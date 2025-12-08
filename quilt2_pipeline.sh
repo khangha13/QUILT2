@@ -27,6 +27,7 @@ Required:
 
 Core options:
   --chunk-file PATH           TSV with either: chr start end [buffer] OR chunk chr start end [buffer].
+  --auto-chunk-map            Use QUILT::quilt_chunk_map to derive chunks (requires QUILT R pkg).
   --chr LIST                  Comma/space list of chromosomes (default apple Chr01-17).
   --buffer N                  Buffer in bp passed to QUILT2 (default 500000).
   --n-gen N                   nGen passed to QUILT2 (default 100).
@@ -67,6 +68,7 @@ REGION_END=""
 BUFFER="${DEFAULT_BUFFER}"
 NGEN="${DEFAULT_NGEN}"
 CHUNK_FILE=""
+AUTO_CHUNK_MAP="false"
 QUILT2_HOME=""
 QUILT2_PREP_SCRIPT="${QUILT2_PREP_SCRIPT:-}"
 QUILT2_RUN_SCRIPT="${QUILT2_RUN_SCRIPT:-}"
@@ -103,6 +105,8 @@ while [[ $# -gt 0 ]]; do
             NGEN="$2"; shift 2 ;;
         --chunk-file)
             CHUNK_FILE="$2"; shift 2 ;;
+        --auto-chunk-map)
+            AUTO_CHUNK_MAP="true"; shift ;;
         --quilt2-home)
             QUILT2_HOME="$2"; shift 2 ;;
         --quilt2-prepare-script)
@@ -332,6 +336,41 @@ add_chunk() {
     fi
     CHUNKS+=("${chunk_id}|${chr}|${start}|${end}|${buffer}")
 }
+
+if [[ -z "${CHUNK_FILE}" && "${AUTO_CHUNK_MAP}" == "true" ]]; then
+    # Derive chunks using QUILT::quilt_chunk_map and the provided genetic map.
+    if ! Rscript -e "quit(status = !requireNamespace('QUILT', quietly = TRUE))"; then
+        log_error "--auto-chunk-map requested but the R package 'QUILT' is not installed."
+        exit 1
+    fi
+    CHUNK_FILE="${TMP_DIR%/}/quilt_auto_chunks.tsv"
+    log_info "Auto-deriving chunks with QUILT::quilt_chunk_map into ${CHUNK_FILE}"
+    r_cmd=$(cat <<'RSCRIPT'
+args <- commandArgs(trailingOnly = TRUE)
+map_file <- args[[1]]
+out_file <- args[[2]]
+chroms <- strsplit(args[[3]], ",")[[1]]
+suppressMessages(library(QUILT))
+rows <- list()
+for (chr in chroms) {
+  dat <- QUILT::quilt_chunk_map(chr, map_file)
+  if (!all(c("chunk","chr","region") %in% names(dat))) {
+    stop("quilt_chunk_map output missing required columns for chr ", chr)
+  }
+  for (i in seq_len(nrow(dat))) {
+    reg <- dat$region[i]
+    # region format like "chr:start-end"
+    parts <- unlist(strsplit(reg, "[:-]"))
+    if (length(parts) != 3) stop("Unexpected region format: ", reg)
+    rows[[length(rows) + 1]] <- c(dat$chunk[i], parts[1], parts[2], parts[3])
+  }
+}
+df <- do.call(rbind, rows)
+write.table(df, file = out_file, sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+RSCRIPT
+)
+    run_cmd Rscript - "${GENETIC_MAP_FILE}" "${CHUNK_FILE}" "$(IFS=','; echo "${CHR_LIST[*]}")" <<< "${r_cmd}"
+fi
 
 if [[ -n "${CHUNK_FILE}" ]]; then
     if [[ ! -f "${CHUNK_FILE}" ]]; then
