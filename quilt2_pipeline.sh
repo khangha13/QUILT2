@@ -3,7 +3,15 @@ set -euo pipefail
 
 # QUILT2 pipeline wrapper for apple data. Uses the provided working folder as
 # the hub for inputs/outputs, reusing GATK pipeline defaults where possible.
+#
+# NOTE: This pipeline currently runs interactively (no SLURM orchestration).
+#       SLURM array parallelization will be added once the pipeline enters
+#       production. All outputs are written to WORK_DIR/quilt2_output/.
+#
+# QUILT2 does NOT require a reference FASTA - it uses the reference panel VCF
+# directly for imputation. See: https://github.com/rwdavies/QUILT/blob/master/README_QUILT2.org
 
+# Reference FASTA used only for chromosome validation via .fai (not passed to QUILT2)
 DEFAULT_APPLE_REF="/QRISdata/Q8367/Reference_Genome/GDDH13_1-1_formatted.fasta"
 DEFAULT_CHROMS=(Chr01 Chr02 Chr03 Chr04 Chr05 Chr06 Chr07 Chr08 Chr09 Chr10 Chr11 Chr12 Chr13 Chr14 Chr15 Chr16 Chr17)
 DEFAULT_BUFFER=500000
@@ -16,25 +24,29 @@ log_error() { echo "[ERROR] $*" >&2; }
 usage() {
     cat <<'EOF'
 Usage:
+  bash quilt2_pipeline.sh -i <work_dir> --genetic-map <map.txt> --auto-chunk-map [options]
+  bash quilt2_pipeline.sh -i <work_dir> --genetic-map <map.txt> --chunk-file <chunks.tsv> [options]
   bash quilt2_pipeline.sh -i <work_dir> --genetic-map <map.txt> --region-start <start> --region-end <end> [options]
-  bash quilt2_pipeline.sh -i <work_dir> --chunk-file <chunks.tsv> [options]
 
 Required:
   -i, --input-dir PATH        Working folder (all outputs stay here).
   --genetic-map PATH          Genetic map file (or set QUILT2_GENETIC_MAP).
-  --region-start N            Region start (bp) unless --chunk-file is provided.
-  --region-end N              Region end (bp) unless --chunk-file is provided.
+
+Region specification (one of the following):
+  --auto-chunk-map            Derive chunks automatically using QUILT::quilt_chunk_map (requires QUILT R pkg).
+  --chunk-file PATH           TSV with either: chr start end [buffer] OR chunk chr start end [buffer].
+  --region-start N            Region start (bp); defaults to 1. Requires --region-end if no chunk-file/auto-chunk.
+  --region-end N              Region end (bp). Required if neither --chunk-file nor --auto-chunk-map is provided.
 
 Core options:
-  --chunk-file PATH           TSV with either: chr start end [buffer] OR chunk chr start end [buffer].
-  --auto-chunk-map            Use QUILT::quilt_chunk_map to derive chunks (requires QUILT R pkg).
   --chr LIST                  Comma/space list of chromosomes (default apple Chr01-17).
   --buffer N                  Buffer in bp passed to QUILT2 (default 500000).
   --n-gen N                   nGen passed to QUILT2 (default 100).
   --bamlist PATH              BAM list (defaults to <work_dir>/bamlist.txt or bamlist.1.0.txt).
 
 Reference/panel options:
-  --reference-fasta PATH      Reference FASTA (default PIPELINE_REFERENCE_FASTA or apple GDDH13 path).
+  --reference-fasta PATH      Reference FASTA for chromosome validation only (not used by QUILT2).
+                              Defaults to PIPELINE_REFERENCE_FASTA or apple GDDH13 path.
   --reference-panel-dir PATH  Directory with phased panel VCFs; defaults to
                               <work_dir>/8.Imputated_VCF_BEAGLE, then 7.Consolidated_VCF, then <work_dir>.
   --quilt2-home PATH          Directory containing QUILT2.R and QUILT2_prepare_reference.R.
@@ -80,6 +92,7 @@ REMOVE_MISSING="false"
 PREP_ONLY="false"
 IMPUTE_ONLY="false"
 DRY_RUN="false"
+BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -180,10 +193,8 @@ if [[ -z "${GENETIC_MAP_FILE}" ]]; then
     exit 1
 fi
 
-if [[ -z "${REFERENCE_FASTA}" ]]; then
-    log_error "Reference FASTA is required (--reference-fasta or PIPELINE_REFERENCE_FASTA)."
-    exit 1
-fi
+# REFERENCE_FASTA is optional - used only for chromosome validation via .fai
+# QUILT2 does not require it (uses reference panel VCF directly)
 
 if [[ -n "${TRUTH_VCF}" && ! -f "${TRUTH_VCF}" ]]; then
     log_error "Truth VCF not found: ${TRUTH_VCF}"
@@ -214,6 +225,29 @@ require_cmd() {
     local cmd="$1"
     if ! command -v "${cmd}" >/dev/null 2>&1; then
         log_error "Command not found: ${cmd}"
+        exit 1
+    fi
+}
+
+ensure_bcftools() {
+    if command -v bcftools >/dev/null 2>&1; then
+        return
+    fi
+
+    if command -v module >/dev/null 2>&1; then
+        if [[ -n "${BCFTOOLS_MODULE}" ]]; then
+            if module load "${BCFTOOLS_MODULE}" >/dev/null 2>&1; then
+                log_info "Loaded ${BCFTOOLS_MODULE} module for bcftools"
+            else
+                log_warn "Failed to load ${BCFTOOLS_MODULE}; bcftools still unavailable"
+            fi
+        fi
+    else
+        log_warn "module command not found; cannot auto-load bcftools."
+    fi
+
+    if ! command -v bcftools >/dev/null 2>&1; then
+        log_error "bcftools not found in PATH. Install it or load module ${BCFTOOLS_MODULE}."
         exit 1
     fi
 }
@@ -262,6 +296,8 @@ load_quilt_env() {
 
 load_quilt_env
 
+ensure_bcftools
+
 for tool in Rscript bcftools; do
     require_cmd "${tool}"
 done
@@ -306,16 +342,33 @@ if [[ ! -f "${GENETIC_MAP_FILE}" ]]; then
     log_error "Genetic map not found: ${GENETIC_MAP_FILE}"
     exit 1
 fi
-if [[ ! -f "${REFERENCE_FASTA}" ]]; then
-    log_error "Reference FASTA not found: ${REFERENCE_FASTA}"
-    exit 1
-fi
 
 readarray -t CHR_LIST <<< "$(printf "%s\n" "${DEFAULT_CHROMS[@]}")"
 if [[ -n "${CHROM_ARG}" ]]; then
     # Accept comma or space separated values
     IFS=', ' read -r -a CHR_LIST <<< "${CHROM_ARG}"
 fi
+
+# Validate chromosomes against reference .fai if available (per GATK §5.4 lessons)
+# REFERENCE_FASTA is optional; only used for this validation, not passed to QUILT2
+if [[ -n "${REFERENCE_FASTA}" && -f "${REFERENCE_FASTA}.fai" ]]; then
+    for chr in "${CHR_LIST[@]}"; do
+        if ! awk -v c="${chr}" '$1==c{found=1; exit} END{exit !found}' "${REFERENCE_FASTA}.fai"; then
+            log_warn "Chromosome '${chr}' not found in ${REFERENCE_FASTA}.fai; ensure naming matches reference."
+        fi
+    done
+elif [[ -n "${REFERENCE_FASTA}" ]]; then
+    log_warn "Reference FASTA index (.fai) not found at ${REFERENCE_FASTA}.fai; skipping chromosome validation."
+fi
+
+# Define run_cmd early so it's available for auto-chunk-map and later stages
+run_cmd() {
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        echo "+ $*"
+    else
+        "$@"
+    fi
+}
 
 declare -a CHUNKS=()
 
@@ -386,11 +439,14 @@ if [[ -n "${CHUNK_FILE}" ]]; then
             continue
         fi
         if [[ "${lc1}" == chr* ]]; then
+            # Format: chr start end [buffer]
             add_chunk "${c1}_${c2}_${c3}" "${c1}" "${c2}" "${c3}" "${c4:-${BUFFER}}"
         elif [[ "${lc2}" == chr* ]]; then
+            # Format: chunk chr start end [buffer]
             add_chunk "${c1}" "${c2}" "${c3}" "${c4}" "${c5:-${BUFFER}}"
         else
-            add_chunk "${c1:-chunk}" "${c1}" "${c2}" "${c3}" "${c4:-${BUFFER}}"
+            # Fallback: assume chr start end [buffer] with non-standard chr naming
+            add_chunk "${c1}_${c2}_${c3}" "${c1}" "${c2}" "${c3}" "${c4:-${BUFFER}}"
         fi
     done < "${CHUNK_FILE}"
 else
@@ -402,14 +458,6 @@ else
         add_chunk "${chr}_${REGION_START}_${REGION_END}" "${chr}" "${REGION_START}" "${REGION_END}" "${BUFFER}"
     done
 fi
-
-run_cmd() {
-    if [[ "${DRY_RUN}" == "true" ]]; then
-        echo "+ $*"
-    else
-        "$@"
-    fi
-}
 
 run_evaluation() {
     local truth_vcf="$1"; shift
@@ -460,50 +508,53 @@ RSCRIPT
     done
 }
 
+# Pick the best panel VCF for a chromosome from REFERENCE_PANEL_DIR.
+# Priority: *phased.vcf.gz > *beagle.vcf.gz > first match.
+# Returns empty string if no suitable VCF found.
+pick_panel_vcf() {
+    local chr="$1"
+    local best_phased=""
+    local best_beagle=""
+    local best_any=""
+
+    local -a candidates=(
+        "${REFERENCE_PANEL_DIR}/apple_panel.refpol.${chr}.vcf.gz"
+        "${REFERENCE_PANEL_DIR}/panel.snps.clean__${chr}.vcf.gz"
+        "${REFERENCE_PANEL_DIR}/${chr}.vcf.gz"
+    )
+    local -a globbed=()
+    while IFS= read -r path; do
+        globbed+=( "${path}" )
+    done < <(find "${REFERENCE_PANEL_DIR}" -maxdepth 1 -type f -name "${chr}*.vcf.gz" 2>/dev/null | sort)
+    candidates+=( "${globbed[@]}" )
+
+    for candidate in "${candidates[@]}"; do
+        [[ -s "${candidate}" ]] || continue
+        local base
+        base="$(basename "${candidate}")"
+        if [[ "${base}" =~ phased\.vcf\.gz$ ]]; then
+            best_phased="${candidate}"
+            break
+        elif [[ -z "${best_beagle}" && "${base}" =~ beagle\.vcf\.gz$ ]]; then
+            best_beagle="${candidate}"
+        elif [[ -z "${best_any}" ]]; then
+            best_any="${candidate}"
+        fi
+    done
+
+    if [[ -n "${best_phased}" ]]; then
+        echo "${best_phased}"
+    elif [[ -n "${best_beagle}" ]]; then
+        echo "${best_beagle}"
+    elif [[ -n "${best_any}" ]]; then
+        echo "${best_any}"
+    else
+        echo ""
+    fi
+}
+
 normalize_panel_vcf() {
     local chr="$1"
-    pick_panel_vcf() {
-        local chr="$1"
-        local best_phased=""
-        local best_beagle=""
-        local best_any=""
-
-        local -a candidates=(
-            "${REFERENCE_PANEL_DIR}/apple_panel.refpol.${chr}.vcf.gz"
-            "${REFERENCE_PANEL_DIR}/panel.snps.clean__${chr}.vcf.gz"
-            "${REFERENCE_PANEL_DIR}/${chr}.vcf.gz"
-        )
-        local -a globbed=()
-        while IFS= read -r path; do
-            globbed+=( "${path}" )
-        done < <(find "${REFERENCE_PANEL_DIR}" -maxdepth 1 -type f -name "${chr}*.vcf.gz" | sort)
-        candidates+=( "${globbed[@]}" )
-
-        for candidate in "${candidates[@]}"; do
-            [[ -s "${candidate}" ]] || continue
-            local base
-            base="$(basename "${candidate}")"
-            if [[ "${base}" =~ phased\.vcf\.gz$ ]]; then
-                best_phased="${candidate}"
-                break
-            elif [[ -z "${best_beagle}" && "${base}" =~ beagle\.vcf\.gz$ ]]; then
-                best_beagle="${candidate}"
-            elif [[ -z "${best_any}" ]]; then
-                best_any="${candidate}"
-            fi
-        done
-
-        if [[ -n "${best_phased}" ]]; then
-            echo "${best_phased}"
-        elif [[ -n "${best_beagle}" ]]; then
-            echo "${best_beagle}"
-        elif [[ -n "${best_any}" ]]; then
-            echo "${best_any}"
-        else
-            echo ""
-        fi
-    }
-
     local invcf=""
     invcf="$(pick_panel_vcf "${chr}")"
 
@@ -515,7 +566,10 @@ normalize_panel_vcf() {
     log_info "Using Step1C panel VCF for ${chr}: ${invcf}"
     if [[ "${DRY_RUN}" != "true" ]]; then
         if [[ "${invcf}" =~ \.vcf\.gz$ ]]; then
-            run_cmd bcftools index -f -c "${invcf}"
+            if ! bcftools index -f -c "${invcf}"; then
+                log_error "Failed to index panel VCF: ${invcf}"
+                exit 1
+            fi
         fi
     else
         echo "+ bcftools index -f -c \"${invcf}\""
@@ -523,7 +577,7 @@ normalize_panel_vcf() {
 
     if [[ "${REMOVE_MISSING}" == "false" ]]; then
         local first_contig=""
-        first_contig=$(zcat "${invcf}" 2>/dev/null | awk '!/^#/ {print $1; exit}')
+        first_contig=$(gzip -dc "${invcf}" 2>/dev/null | awk '!/^#/ {print $1; exit}')
         if [[ -n "${first_contig}" && -z "${CHUNK_FILE}" ]]; then
             log_warn "Detected contig name '${first_contig}' in ${invcf}. Ensure --chr/--region values match this naming."
         fi
@@ -564,7 +618,7 @@ EOF
     fi
 
     local first_contig=""
-    first_contig=$(zcat "${cleaned_vcf}" 2>/dev/null | awk '!/^#/ {print $1; exit}')
+    first_contig=$(gzip -dc "${cleaned_vcf}" 2>/dev/null | awk '!/^#/ {print $1; exit}')
     if [[ -n "${first_contig}" && -z "${CHUNK_FILE}" ]]; then
         log_warn "Detected contig name '${first_contig}' in ${cleaned_vcf}. Ensure --chr/--region values match this naming."
     fi
@@ -655,7 +709,9 @@ log_info "Working directory: ${WORK_DIR}"
 log_info "Panel dir: ${REFERENCE_PANEL_DIR}"
 log_info "Output dir: ${OUTPUT_DIR}"
 log_info "Genetic map: ${GENETIC_MAP_FILE}"
-log_info "Reference FASTA: ${REFERENCE_FASTA}"
+if [[ -n "${REFERENCE_FASTA}" ]]; then
+    log_info "Reference FASTA (validation only): ${REFERENCE_FASTA}"
+fi
 if [[ -n "${BAMLIST}" ]]; then
     log_info "BAM list: ${BAMLIST}"
 fi
@@ -666,6 +722,12 @@ fi
 declare -A PANEL_CACHE=()
 declare -a OUTPUT_VCFS=()
 
+# -----------------------------------------------------------------------------
+# Main processing loop
+# NOTE: Currently runs interactively (sequential). SLURM array parallelization
+#       will be added once the pipeline enters production. All intermediate and
+#       output files are written to ${OUTPUT_DIR} (under WORK_DIR/quilt2_output/).
+# -----------------------------------------------------------------------------
 for chunk in "${CHUNKS[@]}"; do
     IFS='|' read -r chunk_id chr start end buffer <<< "${chunk}"
     log_info "---- Chunk ${chunk_id} (${chr}:${start}-${end}, buffer=${buffer}) ----"
