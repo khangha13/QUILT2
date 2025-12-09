@@ -37,6 +37,8 @@ Core options:
   --prepare-only               Run prepare phase only
   --impute-only                Skip prepare; assumes prepared reference exists
   --dry-run                    Print commands without executing
+  --standardise-name           Create/use Chr01-style renamed VCFs (numeric -> ChrNN)
+  --standardise-name-force     Force re-run of renaming even if outputs exist
   --truth-vcf PATH             Optional truth VCF for evaluation
   --eval-output PATH           Optional evaluation output directory
 
@@ -72,6 +74,8 @@ MIN_PHASED_RATE="0.95"
 PREP_ONLY="false"
 IMPUTE_ONLY="false"
 DRY_RUN="false"
+STANDARDISE_NAME="false"
+STANDARDISE_NAME_FORCE="false"
 BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}"
 QUILT2_CONDA_ENV="${QUILT2_CONDA_ENV:-quilt2}"
 
@@ -99,6 +103,8 @@ while [[ $# -gt 0 ]]; do
         --prepare-only) PREP_ONLY="true"; shift ;;
         --impute-only) IMPUTE_ONLY="true"; shift ;;
         --dry-run) DRY_RUN="true"; shift ;;
+        --standardise-name) STANDARDISE_NAME="true"; shift ;;
+        --standardise-name-force) STANDARDISE_NAME_FORCE="true"; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
         -*)
@@ -139,6 +145,26 @@ if [[ -z "${REFERENCE_PANEL_DIR}" ]]; then
     exit 1
 fi
 REFERENCE_PANEL_DIR="$(cd "${REFERENCE_PANEL_DIR}" && pwd)"
+
+# Optionally standardise contig names (numeric -> ChrNN) in panel VCFs before proceeding.
+# Uses bin/standardize_chr_names.sh; outputs stay in the same directory with suffix _chr by default.
+if [[ "${STANDARDISE_NAME}" == "true" ]]; then
+    standardiser="${QUILT2_ROOT}/bin/standardize_chr_names.sh"
+    if [[ ! -x "${standardiser}" ]]; then
+        log_error "standardize_chr_names.sh not found or not executable at ${standardiser}"
+        exit 1
+    fi
+    ensure_bcftools || exit 1
+    std_args=( -i "${REFERENCE_PANEL_DIR}" --out-dir "${REFERENCE_PANEL_DIR}" --suffix _chr )
+    if [[ "${STANDARDISE_NAME_FORCE}" == "true" ]]; then
+        std_args+=( --force )
+    fi
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        echo "+ ${standardiser} ${std_args[*]}"
+    else
+        "${standardiser}" "${std_args[@]}"
+    fi
+fi
 
 if [[ -z "${GENETIC_MAP_FILE}" ]]; then
     log_error "Genetic map is required (--genetic-map or QUILT2_GENETIC_MAP)."
