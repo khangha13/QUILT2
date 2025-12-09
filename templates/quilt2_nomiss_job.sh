@@ -25,6 +25,9 @@ CHR_MANIFEST="$5"
 BCFTOOLS_MODULE="${6:-${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}}"
 QUILT2_CONDA_ENV="${7:-${QUILT2_CONDA_ENV:-quilt2}}"
 FAIL_FLAG="${8:-${NOMISS_FAIL_FLAG:-}}"
+STANDARDISE_NAME="${STANDARDISE_NAME:-false}"
+STANDARDISE_NAME_FORCE="${STANDARDISE_NAME_FORCE:-false}"
+STANDARDISE_SUFFIX="${STANDARDISE_SUFFIX:-_chr}"
 
 # Propagate DRY_RUN if set by orchestrator
 DRY_RUN="${DRY_RUN:-false}"
@@ -72,8 +75,61 @@ export BCFTOOLS_MODULE QUILT2_CONDA_ENV
 load_quilt_env || exit 1
 ensure_bcftools || exit 1
 
+standardize_panel_vcf() {
+    local chr="$1"
+    local src_dir="$2"
+    local out_dir="$3"
+    local suffix="$4"
+    local force="$5"
+
+    local src
+    src="$(pick_panel_vcf "${src_dir}" "${chr}")"
+    if [[ -z "${src}" ]]; then
+        log_error "No source VCF found to standardise for ${chr} in ${src_dir}"
+        return 1
+    fi
+
+    mkdir -p "${out_dir}"
+    local dest="${out_dir%/}/${chr}${suffix}.vcf.gz"
+
+    if [[ -f "${dest}" && "${force}" != "true" ]]; then
+        log_info "Standardised VCF already exists for ${chr}: ${dest}"
+        echo "${dest}"
+        return 0
+    fi
+
+    # Build a simple rename map 1..17 -> Chr01..Chr17 (matches apple panel); already-Chr contigs remain unchanged.
+    local rename_map
+    rename_map="$(mktemp)"
+    trap 'rm -f "${rename_map}"' RETURN
+    : > "${rename_map}"
+    for i in $(seq 1 17); do
+        printf "%d\tChr%02d\n" "${i}" "${i}" >> "${rename_map}"
+    done
+
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        cat <<EOF
++ bcftools annotate --rename-chrs "${rename_map}" "${src}" -Oz -o "${dest}"
++ bcftools index -f -c "${dest}"
+EOF
+        echo "${dest}"
+        return 0
+    fi
+
+    log_info "Standardising ${chr}: ${src} -> ${dest}"
+    bcftools annotate --rename-chrs "${rename_map}" "${src}" -Oz -o "${dest}"
+    bcftools index -f -c "${dest}"
+    echo "${dest}"
+}
+
 log_info "Phase 1: filtering panel for ${CHR} (min phased rate ${MIN_PHASED_RATE})"
-cleaned_vcf="$(normalize_panel_vcf "${CHR}" "${REFERENCE_PANEL_DIR}")"
+panel_source_dir="${REFERENCE_PANEL_DIR}"
+if [[ "${STANDARDISE_NAME}" == "true" ]]; then
+    std_vcf="$(standardize_panel_vcf "${CHR}" "${REFERENCE_PANEL_DIR}" "${PANEL_OUT_DIR}" "${STANDARDISE_SUFFIX}" "${STANDARDISE_NAME_FORCE}")" || exit 1
+    panel_source_dir="$(cd "$(dirname "${std_vcf}")" && pwd)"
+fi
+
+cleaned_vcf="$(normalize_panel_vcf "${CHR}" "${panel_source_dir}")"
 
 if [[ "${DRY_RUN}" != "true" ]]; then
     if [[ -z "${cleaned_vcf}" || ! -s "${cleaned_vcf}" ]]; then

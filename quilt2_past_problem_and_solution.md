@@ -280,6 +280,27 @@ done
 
 ---
 
+## 12. `--standardise-name` now runs in Phase 1 (with `--remove-missing`)
+
+### Problem
+- Contig standardisation ran sequentially from the master and could not be combined with `--remove-missing`; per-chrom jobs were not SLURM-parallelised, and the master could not validate per-chrom outputs before Phase 2.
+
+### Solution
+- Phase 1 array now handles both operations per chromosome when requested:
+  - If `--standardise-name`: create `quilt2_output/panel/<chr>_chr.vcf.gz` (+ index), skipping unless `--standardise-name-force`.
+  - If `--remove-missing`: create `quilt2_output/panel/quilt.nomiss.<chr>.vcf.gz` (+ index).
+  - When both are set: each task runs standardise → remove-missing on the same chromosome.
+- The master runs Phase 1 when either flag is set, waits on the job ID, and validates outputs (standardised and/or filtered) before submitting Phase 2. Phase 2 consumes `quilt2_output/panel/` to avoid re-running standardise/remove-missing.
+
+### Notes / How to debug
+- Phase 1 logs: `quilt2_slurm/quilt2_nomiss_%A_%a.output|error`; failure flag: `quilt2_slurm/quilt2_nomiss_failed.flag`.
+- Outputs checked before Phase 2:
+  - Standardised: `quilt2_output/panel/<chr>_chr.vcf.gz` (+ .csi/.tbi) when `--standardise-name`.
+  - Filtered: `quilt2_output/panel/quilt.nomiss.<chr>.vcf.gz` (+ .csi/.tbi) when `--remove-missing`.
+  - Phase 2 panel input directory: `quilt2_output/panel/` when Phase 1 ran; original directory otherwise.
+
+---
+
 ## Summary Checklist
 
 Before running QUILT2 pipeline, verify:

@@ -247,9 +247,14 @@ if [[ -n "${CHROM_ARG}" ]]; then
     IFS=', ' read -r -a CHR_LIST <<< "${CHROM_ARG}"
 fi
 
-# Phase 1: remove-missing as a SLURM array (per chromosome)
-if [[ "${REMOVE_MISSING}" == "true" ]]; then
-    log_info "Phase 1: submitting remove-missing array over ${#CHR_LIST[@]} chromosomes"
+# Phase 1: panel prep (standardise and/or remove-missing) as a SLURM array (per chromosome)
+RUN_PHASE1="false"
+if [[ "${REMOVE_MISSING}" == "true" || "${STANDARDISE_NAME}" == "true" ]]; then
+    RUN_PHASE1="true"
+fi
+
+if [[ "${RUN_PHASE1}" == "true" ]]; then
+    log_info "Phase 1: submitting panel prep array over ${#CHR_LIST[@]} chromosomes (standardise=${STANDARDISE_NAME}, remove_missing=${REMOVE_MISSING})"
     rm -f "${NOMISS_FAIL_FLAG}"
 
     configured_array_limit="${CFG_ARRAY_MAX:-0}"
@@ -296,6 +301,9 @@ export QUILT2_ROOT="${QUILT2_ROOT}"
 export DRY_RUN="${DRY_RUN}"
 export NOMISS_FAIL_FLAG="${NOMISS_FAIL_FLAG}"
 export MISSING_REPORT="${MISSING_REPORT}"
+export STANDARDISE_NAME="${STANDARDISE_NAME}"
+export STANDARDISE_NAME_FORCE="${STANDARDISE_NAME_FORCE}"
+export STANDARDISE_SUFFIX="_chr"
 
 bash "${NOMISS_TEMPLATE}" \
   "${WORK_DIR}" \
@@ -327,14 +335,27 @@ EOF
     # Validate Phase 1 outputs before proceeding
     if [[ "${DRY_RUN}" != "true" ]]; then
         for chr in "${PHASE1_CHR_LIST[@]}"; do
-            cleaned="${PANEL_OUT_DIR%/}/quilt.nomiss.${chr}.vcf.gz"
-            if [[ ! -s "${cleaned}" ]]; then
-                log_error "Phase 1 output missing for ${chr}: ${cleaned}"
-                exit 1
+            if [[ "${STANDARDISE_NAME}" == "true" ]]; then
+                std="${PANEL_OUT_DIR%/}/${chr}_chr.vcf.gz"
+                if [[ ! -s "${std}" ]]; then
+                    log_error "Phase 1 standardised VCF missing for ${chr}: ${std}"
+                    exit 1
+                fi
+                if [[ ! -f "${std}.csi" && ! -f "${std}.tbi" ]]; then
+                    log_error "Index missing for ${chr}: ${std}(.csi|.tbi)"
+                    exit 1
+                fi
             fi
-            if [[ ! -f "${cleaned}.csi" && ! -f "${cleaned}.tbi" ]]; then
-                log_error "Index missing for ${chr}: ${cleaned}(.csi|.tbi)"
-                exit 1
+            if [[ "${REMOVE_MISSING}" == "true" ]]; then
+                cleaned="${PANEL_OUT_DIR%/}/quilt.nomiss.${chr}.vcf.gz"
+                if [[ ! -s "${cleaned}" ]]; then
+                    log_error "Phase 1 filtered VCF missing for ${chr}: ${cleaned}"
+                    exit 1
+                fi
+                if [[ ! -f "${cleaned}.csi" && ! -f "${cleaned}.tbi" ]]; then
+                    log_error "Index missing for ${chr}: ${cleaned}(.csi|.tbi)"
+                    exit 1
+                fi
             fi
         done
         log_info "Phase 1 outputs verified for all chromosomes."
@@ -480,6 +501,10 @@ fi
 
 SLURM_SCRIPT="${SLURM_DIR}/quilt2_array_$(date +%Y%m%d_%H%M%S).sh"
 TEMPLATE="${QUILT2_ROOT}/templates/quilt2_job.sh"
+PHASE2_PANEL_DIR="${REFERENCE_PANEL_DIR}"
+if [[ "${RUN_PHASE1}" == "true" ]]; then
+    PHASE2_PANEL_DIR="${PANEL_OUT_DIR}"
+fi
 
 if [[ ! -f "${TEMPLATE}" ]]; then
     log_error "Template not found: ${TEMPLATE}"
@@ -510,7 +535,7 @@ export DRY_RUN="${DRY_RUN}"
 bash "${TEMPLATE}" \
   "${WORK_DIR}" \
   "${MANIFEST_FILE}" \
-  "${REFERENCE_PANEL_DIR}" \
+  "${PHASE2_PANEL_DIR}" \
   "${GENETIC_MAP_FILE}" \
   "${GENETIC_MAP_IS_DIR}" \
   "${QUILT2_PREP_SCRIPT}" \
