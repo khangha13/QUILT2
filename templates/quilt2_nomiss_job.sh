@@ -33,7 +33,7 @@ STANDARDISE_SUFFIX="${STANDARDISE_SUFFIX:-_chr}"
 DRY_RUN="${DRY_RUN:-false}"
 
 # Export flags consumed by helpers
-export REMOVE_MISSING="true"
+export REMOVE_MISSING="${REMOVE_MISSING:-false}"
 export MIN_PHASED_RATE
 export PANEL_OUT_DIR
 export MISSING_REPORT="${MISSING_REPORT:-${PANEL_OUT_DIR%/}/missing_sites_removed.tsv}"
@@ -122,14 +122,30 @@ EOF
     echo "${dest}"
 }
 
-log_info "Phase 1: filtering panel for ${CHR} (min phased rate ${MIN_PHASED_RATE})"
+log_info "Phase 1: panel prep for ${CHR} (standardise=${STANDARDISE_NAME}, remove_missing=${REMOVE_MISSING}, min phased rate ${MIN_PHASED_RATE})"
 panel_source_dir="${REFERENCE_PANEL_DIR}"
 if [[ "${STANDARDISE_NAME}" == "true" ]]; then
     std_vcf="$(standardize_panel_vcf "${CHR}" "${REFERENCE_PANEL_DIR}" "${PANEL_OUT_DIR}" "${STANDARDISE_SUFFIX}" "${STANDARDISE_NAME_FORCE}")" || exit 1
     panel_source_dir="$(cd "$(dirname "${std_vcf}")" && pwd)"
 fi
+cleaned_vcf=""
+if [[ "${REMOVE_MISSING}" == "true" ]]; then
+    cleaned_vcf="$(normalize_panel_vcf "${CHR}" "${panel_source_dir}")"
+fi
 
-cleaned_vcf="$(normalize_panel_vcf "${CHR}" "${panel_source_dir}")"
+# If remove-missing not requested, still ensure the source panel is indexed.
+if [[ "${REMOVE_MISSING}" != "true" ]]; then
+    src_for_index="${panel_source_dir%/}/${CHR}${STANDARDISE_SUFFIX}.vcf.gz"
+    if [[ ! -f "${src_for_index}" ]]; then
+        # fallback to any panel pick
+        src_for_index="$(pick_panel_vcf "${panel_source_dir}" "${CHR}")"
+    fi
+    if [[ -n "${src_for_index}" && -f "${src_for_index}" && "${DRY_RUN}" != "true" ]]; then
+        if [[ "${src_for_index}" =~ \.vcf\.gz$ ]]; then
+            bcftools index -f -c "${src_for_index}"
+        fi
+    fi
+fi
 
 if [[ "${DRY_RUN}" != "true" ]]; then
     if [[ -z "${cleaned_vcf}" || ! -s "${cleaned_vcf}" ]]; then

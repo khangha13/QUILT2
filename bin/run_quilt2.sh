@@ -148,26 +148,6 @@ if [[ -z "${REFERENCE_PANEL_DIR}" ]]; then
 fi
 REFERENCE_PANEL_DIR="$(cd "${REFERENCE_PANEL_DIR}" && pwd)"
 
-# Optionally standardise contig names (numeric -> ChrNN) in panel VCFs before proceeding.
-# Uses bin/standardize_chr_names.sh; outputs stay in the same directory with suffix _chr by default.
-if [[ "${STANDARDISE_NAME}" == "true" ]]; then
-    standardiser="${QUILT2_ROOT}/bin/standardize_chr_names.sh"
-    if [[ ! -f "${standardiser}" ]]; then
-        log_error "standardize_chr_names.sh not found at ${standardiser}"
-        exit 1
-    fi
-    ensure_bcftools || exit 1
-    std_args=( -i "${REFERENCE_PANEL_DIR}" --out-dir "${REFERENCE_PANEL_DIR}" --suffix _chr )
-    if [[ "${STANDARDISE_NAME_FORCE}" == "true" ]]; then
-        std_args+=( --force )
-    fi
-    if [[ "${DRY_RUN}" == "true" ]]; then
-        echo "+ bash ${standardiser} ${std_args[*]}"
-    else
-        bash "${standardiser}" "${std_args[@]}"
-    fi
-fi
-
 if [[ -z "${GENETIC_MAP_FILE}" ]]; then
     log_error "Genetic map is required (--genetic-map or QUILT2_GENETIC_MAP)."
     exit 1
