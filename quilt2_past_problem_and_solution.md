@@ -257,6 +257,29 @@ done
 
 ---
 
+## 11. `--remove-missing` now runs in two SLURM phases
+
+### Problem
+- The `--remove-missing` filter ran sequentially inside `run_quilt2.sh`, so per-chromosome filtering could not use SLURM and the master could launch Phase 2 without knowing Phase 1 status.
+- Failures during filtering were silent (no job ID, no failure flag), making diagnosis hard when panel inputs were bad.
+
+### Solution
+- Added a dedicated Phase 1 SLURM array (`templates/quilt2_nomiss_job.sh`) that filters the panel per chromosome and writes cleaned VCFs to `quilt2_output/panel/` (`quilt.nomiss.<chr>.vcf.gz` + index).
+- The master (`bin/run_quilt2.sh`) now:
+  - Submits Phase 1 when `--remove-missing` is set, records the job ID in `quilt2_slurm/quilt2_nomiss_job_id.txt`, and waits on the job (`squeue` poll).
+  - Uses a failure flag `quilt2_slurm/quilt2_nomiss_failed.flag` that Phase 1 workers touch on any error (trap on `ERR`).
+  - Verifies every cleaned VCF and index exist before submitting Phase 2 (chunk array).
+- Phase 2 still passes `--remove-missing`; workers detect existing `quilt.nomiss.*` files and skip re-filtering.
+
+### Notes / How to debug
+- Phase 1 SLURM logs: `quilt2_slurm/quilt2_nomiss_%A_%a.output|error`.
+- If Phase 1 fails: check the failure flag, then inspect per-task logs and the panel directory for the missing chromosome.
+- Job IDs:
+  - Phase 1: `quilt2_slurm/quilt2_nomiss_job_id.txt`
+  - Phase 2: `quilt2_slurm/quilt2_job_id.txt`
+
+---
+
 ## Summary Checklist
 
 Before running QUILT2 pipeline, verify:

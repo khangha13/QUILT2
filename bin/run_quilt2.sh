@@ -129,8 +129,10 @@ OUTPUT_DIR="${WORK_DIR%/}/quilt2_output"
 PANEL_OUT_DIR="${OUTPUT_DIR}/panel"
 RDATA_DIR="${OUTPUT_DIR}/RData"
 TMP_DIR="${OUTPUT_DIR}/tmp"
-mkdir -p "${OUTPUT_DIR}" "${PANEL_OUT_DIR}" "${RDATA_DIR}" "${TMP_DIR}"
+SLURM_DIR="${WORK_DIR%/}/quilt2_slurm"
+mkdir -p "${OUTPUT_DIR}" "${PANEL_OUT_DIR}" "${RDATA_DIR}" "${TMP_DIR}" "${SLURM_DIR}"
 MISSING_REPORT="${PANEL_OUT_DIR}/missing_sites_removed.tsv"
+NOMISS_FAIL_FLAG="${SLURM_DIR}/quilt2_nomiss_failed.flag"
 
 if [[ -z "${REFERENCE_PANEL_DIR}" ]]; then
     for candidate in "${WORK_DIR}/8.Imputated_VCF_BEAGLE" "${WORK_DIR}/7.Consolidated_VCF" "${WORK_DIR}"; do
@@ -201,9 +203,142 @@ if [[ -z "${BAMLIST}" && "${PREP_ONLY}" != "true" ]]; then
     exit 1
 fi
 
+wait_for_slurm_job() {
+    local job_id="$1" desc="$2" fail_flag="$3"
+    log_info "Waiting for ${desc} job ${job_id} to finish..."
+    while true; do
+        if command -v squeue >/dev/null 2>&1; then
+            queue_out="$(squeue -h -j "${job_id}" 2>/dev/null || true)"
+            if [[ -n "${queue_out}" ]]; then
+                sleep 20
+                continue
+            fi
+        else
+            # No scheduler query available; exit loop and rely on output/flag checks.
+            sleep 20
+        fi
+        break
+    done
+    if [[ -n "${fail_flag}" && -f "${fail_flag}" ]]; then
+        log_error "${desc} failed; see ${fail_flag}"
+        exit 1
+    fi
+}
+
+# SLURM config (shared by both phases)
+config="$(get_quilt2_config)"
+CFG_ACCOUNT="" CFG_PARTITION="" CFG_QOS="" CFG_NODES="" CFG_NTASKS="" CFG_CPUS="" CFG_MEMORY="" CFG_TIME="" CFG_ARRAY_MAX=""
+while IFS='=' read -r k v; do
+    case "${k}" in
+        ACCOUNT) CFG_ACCOUNT="${v}" ;;
+        PARTITION) CFG_PARTITION="${v}" ;;
+        QOS) CFG_QOS="${v}" ;;
+        NODES) CFG_NODES="${v}" ;;
+        NTASKS) CFG_NTASKS="${v}" ;;
+        CPUS) CFG_CPUS="${v}" ;;
+        MEMORY) CFG_MEMORY="${v}" ;;
+        TIME) CFG_TIME="${v}" ;;
+        ARRAY_MAX) CFG_ARRAY_MAX="${v}" ;;
+    esac
+done <<< "${config}"
+
 CHR_LIST=("${DEFAULT_CHROMS[@]}")
 if [[ -n "${CHROM_ARG}" ]]; then
     IFS=', ' read -r -a CHR_LIST <<< "${CHROM_ARG}"
+fi
+
+# Phase 1: remove-missing as a SLURM array (per chromosome)
+if [[ "${REMOVE_MISSING}" == "true" ]]; then
+    log_info "Phase 1: submitting remove-missing array over ${#CHR_LIST[@]} chromosomes"
+    rm -f "${NOMISS_FAIL_FLAG}"
+
+    configured_array_limit="${CFG_ARRAY_MAX:-0}"
+    PHASE1_CHR_LIST=( "${CHR_LIST[@]}" )
+    if [[ "${configured_array_limit}" -gt 0 && "${#PHASE1_CHR_LIST[@]}" -gt "${configured_array_limit}" ]]; then
+        log_warn "Phase 1 chromosome count (${#PHASE1_CHR_LIST[@]}) exceeds array cap (${configured_array_limit}); truncating manifest."
+        PHASE1_CHR_LIST=( "${PHASE1_CHR_LIST[@]:0:${configured_array_limit}}" )
+    fi
+
+    nomiss_manifest="${SLURM_DIR}/quilt2_nomiss_chr_$(date +%Y%m%d_%H%M%S).txt"
+    : > "${nomiss_manifest}"
+    for chr in "${PHASE1_CHR_LIST[@]}"; do
+        echo "${chr}" >> "${nomiss_manifest}"
+    done
+
+    nomiss_array_max=$(( ${#PHASE1_CHR_LIST[@]} - 1 ))
+
+    NOMISS_TEMPLATE="${QUILT2_ROOT}/templates/quilt2_nomiss_job.sh"
+    if [[ ! -f "${NOMISS_TEMPLATE}" ]]; then
+        log_error "Phase 1 template not found: ${NOMISS_TEMPLATE}"
+        exit 1
+    fi
+
+    NOMISS_SCRIPT="${SLURM_DIR}/quilt2_nomiss_$(date +%Y%m%d_%H%M%S).sh"
+    {
+    cat <<EOF
+#!/bin/bash
+#SBATCH --job-name=Q2NOMISS
+EOF
+    [[ -n "${CFG_ACCOUNT}" ]]   && echo "#SBATCH --account=${CFG_ACCOUNT}"
+    [[ -n "${CFG_PARTITION}" ]] && echo "#SBATCH --partition=${CFG_PARTITION}"
+    [[ -n "${CFG_QOS}" ]]       && echo "#SBATCH --qos=${CFG_QOS}"
+    cat <<EOF
+#SBATCH --nodes=${CFG_NODES}
+#SBATCH --ntasks=${CFG_NTASKS}
+#SBATCH --cpus-per-task=${CFG_CPUS}
+#SBATCH --mem=${CFG_MEMORY}
+#SBATCH --time=${CFG_TIME}
+#SBATCH --array=0-${nomiss_array_max}
+#SBATCH --output=${SLURM_DIR}/quilt2_nomiss_%A_%a.output
+#SBATCH --error=${SLURM_DIR}/quilt2_nomiss_%A_%a.error
+
+export QUILT2_ROOT="${QUILT2_ROOT}"
+export DRY_RUN="${DRY_RUN}"
+export NOMISS_FAIL_FLAG="${NOMISS_FAIL_FLAG}"
+export MISSING_REPORT="${MISSING_REPORT}"
+
+bash "${NOMISS_TEMPLATE}" \
+  "${WORK_DIR}" \
+  "${REFERENCE_PANEL_DIR}" \
+  "${PANEL_OUT_DIR}" \
+  "${MIN_PHASED_RATE}" \
+  "${nomiss_manifest}" \
+  "${BCFTOOLS_MODULE}" \
+  "${QUILT2_CONDA_ENV}" \
+  "${NOMISS_FAIL_FLAG}"
+EOF
+    } > "${NOMISS_SCRIPT}"
+    chmod +x "${NOMISS_SCRIPT}"
+
+    log_info "Generated Phase 1 SLURM script: ${NOMISS_SCRIPT}"
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        echo "[DRY-RUN] Would submit Phase 1: sbatch ${NOMISS_SCRIPT}"
+    else
+        nomiss_job_id="$(sbatch "${NOMISS_SCRIPT}" | awk '{print $4}')"
+        if [[ -z "${nomiss_job_id}" ]]; then
+            log_error "Failed to submit Phase 1 SLURM job."
+            exit 1
+        fi
+        echo "${nomiss_job_id}" > "${SLURM_DIR}/quilt2_nomiss_job_id.txt"
+        log_info "Submitted Phase 1 array job ${nomiss_job_id} (script: ${NOMISS_SCRIPT})"
+        wait_for_slurm_job "${nomiss_job_id}" "Phase 1 remove-missing" "${NOMISS_FAIL_FLAG}"
+    fi
+
+    # Validate Phase 1 outputs before proceeding
+    if [[ "${DRY_RUN}" != "true" ]]; then
+        for chr in "${PHASE1_CHR_LIST[@]}"; do
+            cleaned="${PANEL_OUT_DIR%/}/quilt.nomiss.${chr}.vcf.gz"
+            if [[ ! -s "${cleaned}" ]]; then
+                log_error "Phase 1 output missing for ${chr}: ${cleaned}"
+                exit 1
+            fi
+            if [[ ! -f "${cleaned}.csi" && ! -f "${cleaned}.tbi" ]]; then
+                log_error "Index missing for ${chr}: ${cleaned}(.csi|.tbi)"
+                exit 1
+            fi
+        done
+        log_info "Phase 1 outputs verified for all chromosomes."
+    fi
 fi
 
 # Resolve QUILT2 scripts
@@ -336,23 +471,6 @@ fi
 MANIFEST_FILE="${TMP_DIR%/}/quilt2_chunks_$(date +%Y%m%d_%H%M%S).txt"
 create_chunk_manifest "${MANIFEST_FILE}" "${CHUNKS[@]}" || exit 1
 
-# Build SLURM script from template
-config="$(get_quilt2_config)"
-CFG_ACCOUNT="" CFG_PARTITION="" CFG_QOS="" CFG_NODES="" CFG_NTASKS="" CFG_CPUS="" CFG_MEMORY="" CFG_TIME="" CFG_ARRAY_MAX=""
-while IFS='=' read -r k v; do
-    case "${k}" in
-        ACCOUNT) CFG_ACCOUNT="${v}" ;;
-        PARTITION) CFG_PARTITION="${v}" ;;
-        QOS) CFG_QOS="${v}" ;;
-        NODES) CFG_NODES="${v}" ;;
-        NTASKS) CFG_NTASKS="${v}" ;;
-        CPUS) CFG_CPUS="${v}" ;;
-        MEMORY) CFG_MEMORY="${v}" ;;
-        TIME) CFG_TIME="${v}" ;;
-        ARRAY_MAX) CFG_ARRAY_MAX="${v}" ;;
-    esac
-done <<< "${config}"
-
 array_max=$(( ${#CHUNKS[@]} - 1 ))
 configured_array_limit="${CFG_ARRAY_MAX:-0}"
 if [[ "${configured_array_limit}" -gt 0 && "${array_max}" -ge "${configured_array_limit}" ]]; then
@@ -360,8 +478,6 @@ if [[ "${configured_array_limit}" -gt 0 && "${array_max}" -ge "${configured_arra
     array_max=$((configured_array_limit - 1))
 fi
 
-SLURM_DIR="${WORK_DIR%/}/quilt2_slurm"
-mkdir -p "${SLURM_DIR}"
 SLURM_SCRIPT="${SLURM_DIR}/quilt2_array_$(date +%Y%m%d_%H%M%S).sh"
 TEMPLATE="${QUILT2_ROOT}/templates/quilt2_job.sh"
 

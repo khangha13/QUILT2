@@ -97,6 +97,11 @@ fi
 
 for vcf in "${vcfs[@]}"; do
     base="$(basename "${vcf}" .vcf.gz)"
+    # If the file name already suggests it was renamed (e.g., contains "_renamed"), skip unless forcing.
+    if [[ "${base}" == *"_renamed"* && "${FORCE}" != "true" ]]; then
+        echo "Skipping already-renamed file: ${vcf}" >&2
+        continue
+    fi
     # Skip files that already end with the suffix (to avoid suffix stacking)
     if [[ "${base}" == *"${SUFFIX}" ]]; then
         echo "Skipping already-standardized file: ${vcf}" >&2

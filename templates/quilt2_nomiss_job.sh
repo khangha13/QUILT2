@@ -1,0 +1,89 @@
+#!/bin/bash
+# QUILT2 Phase 1 array worker: filter panel VCF by phased rate (per chromosome)
+set -euo pipefail
+
+# The orchestrator substitutes this placeholder with an absolute path.
+QUILT2_ROOT="${QUILT2_ROOT:-__QUILT2_ROOT__}"
+
+if [ ! -d "${QUILT2_ROOT}" ]; then
+    echo "[quilt2_nomiss_job] ERROR: QUILT2_ROOT does not exist: ${QUILT2_ROOT}" >&2
+    exit 1
+fi
+
+source "${QUILT2_ROOT}/lib/functions.sh"
+
+if [ "$#" -lt 5 ]; then
+    log_error "Usage: quilt2_nomiss_job.sh <WORK_DIR> <REFERENCE_PANEL_DIR> <PANEL_OUT_DIR> <MIN_PHASED_RATE> <CHR_MANIFEST> [BCFTOOLS_MODULE] [QUILT2_CONDA_ENV] [FAIL_FLAG]"
+    exit 1
+fi
+
+WORK_DIR="$1"
+REFERENCE_PANEL_DIR="$2"
+PANEL_OUT_DIR="$3"
+MIN_PHASED_RATE="$4"
+CHR_MANIFEST="$5"
+BCFTOOLS_MODULE="${6:-${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}}"
+QUILT2_CONDA_ENV="${7:-${QUILT2_CONDA_ENV:-quilt2}}"
+FAIL_FLAG="${8:-${NOMISS_FAIL_FLAG:-}}"
+
+# Propagate DRY_RUN if set by orchestrator
+DRY_RUN="${DRY_RUN:-false}"
+
+# Export flags consumed by helpers
+export REMOVE_MISSING="true"
+export MIN_PHASED_RATE
+export PANEL_OUT_DIR
+export MISSING_REPORT="${MISSING_REPORT:-${PANEL_OUT_DIR%/}/missing_sites_removed.tsv}"
+export CHUNK_FILE="" # ensure normalize_panel_vcf contig warning is meaningful
+
+# Guardrails
+if [ -z "${SLURM_ARRAY_TASK_ID:-}" ]; then
+    log_error "SLURM_ARRAY_TASK_ID is not set; this script must run as a SLURM array job."
+    exit 1
+fi
+
+if [ ! -f "${CHR_MANIFEST}" ]; then
+    log_error "Chromosome manifest not found: ${CHR_MANIFEST}"
+    exit 1
+fi
+
+readarray -t CHR_LIST < "${CHR_MANIFEST}"
+chr_count="${#CHR_LIST[@]}"
+if ! [[ "${SLURM_ARRAY_TASK_ID}" =~ ^[0-9]+$ ]] || [ "${SLURM_ARRAY_TASK_ID}" -lt 0 ] || [ "${SLURM_ARRAY_TASK_ID}" -ge "${chr_count}" ]; then
+    log_error "Array index ${SLURM_ARRAY_TASK_ID} out of range 0..$((chr_count-1))"
+    exit 1
+fi
+
+CHR="${CHR_LIST[$SLURM_ARRAY_TASK_ID]}"
+
+if [[ -n "${FAIL_FLAG}" ]]; then
+    on_error() {
+        log_error "Phase 1 filtering failed for ${CHR}; setting failure flag ${FAIL_FLAG}"
+        touch "${FAIL_FLAG}" || true
+    }
+    trap on_error ERR
+fi
+
+# Ensure output directories exist
+mkdir -p "${PANEL_OUT_DIR}"
+
+# Tooling
+export BCFTOOLS_MODULE QUILT2_CONDA_ENV
+load_quilt_env || exit 1
+ensure_bcftools || exit 1
+
+log_info "Phase 1: filtering panel for ${CHR} (min phased rate ${MIN_PHASED_RATE})"
+cleaned_vcf="$(normalize_panel_vcf "${CHR}" "${REFERENCE_PANEL_DIR}")"
+
+if [[ "${DRY_RUN}" != "true" ]]; then
+    if [[ -z "${cleaned_vcf}" || ! -s "${cleaned_vcf}" ]]; then
+        log_error "Filtered VCF missing or empty for ${CHR}: ${cleaned_vcf:-<empty>}"
+        exit 1
+    fi
+    if [[ ! -f "${cleaned_vcf}.csi" && ! -f "${cleaned_vcf}.tbi" ]]; then
+        log_error "Index for filtered VCF missing for ${CHR}: ${cleaned_vcf}(.csi|.tbi)"
+        exit 1
+    fi
+fi
+
+log_info "Phase 1: completed ${CHR} → ${cleaned_vcf}"
