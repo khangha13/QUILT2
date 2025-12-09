@@ -80,6 +80,15 @@ export QUILT2_TIME_LIMIT=12:00:00
 export QUILT2_ARRAY_MAX=0   # 0 = no cap
 ```
 
+## Execution model (self-submit + phases)
+- Default: `bin/run_quilt2.sh` self-submits via `sbatch` when not already in SLURM, then exits. Opt out with `--no-submit` or `--submit-self=false`. Master job ID: `quilt2_slurm/quilt2_master_job_id.txt`; logs: `quilt2_slurm/quilt2_master_%j.(output|error)`.
+- Phase 1 (panel prep array): runs per chromosome when `--standardise-name` and/or `--remove-missing` are set. Outputs in `quilt2_output/panel/`:
+  - Standardised: `<chr>_chr.vcf.gz` (+ index), skipped unless `--standardise-name-force`.
+  - Filtered: `quilt.nomiss.<chr>.vcf.gz` (+ index) when `--remove-missing`.
+  - Job ID/logs: `quilt2_slurm/quilt2_nomiss_job_id.txt`, `quilt2_slurm/quilt2_nomiss_%A_%a.(output|error)`.
+- Phase 2 (chunk array): uses `quilt2_output/panel/` if Phase 1 ran; otherwise the original panel dir. Job ID/logs: `quilt2_slurm/quilt2_job_id.txt`, `quilt2_slurm/quilt2_%A_%a.(output|error)`.
+- `--dry-run` prints the master sbatch command and exits; Phase 1/2 scripts are still generated for inspection.
+
 Cache awareness (when changing inputs/settings):
 - Remove cached chunks: `rm -f quilt2_output/tmp/quilt_auto_chunks.tsv`
 - Remove filtered panels: `rm -f quilt2_output/panel/quilt.nomiss.*`
