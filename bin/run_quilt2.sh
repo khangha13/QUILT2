@@ -141,7 +141,7 @@ NOMISS_FAIL_FLAG="${SLURM_DIR}/quilt2_nomiss_failed.flag"
 if [[ "${SUBMIT_SELF}" == "true" && -z "${SLURM_JOB_ID:-}" ]]; then
     MASTER_SCRIPT="${SLURM_DIR}/quilt2_master_$(date +%Y%m%d_%H%M%S).sh"
     {
-    cat <<'EOF'
+    cat <<EOF
 #!/bin/bash
 #SBATCH --job-name=Q2_MASTER
 #SBATCH --output=${SLURM_DIR}/quilt2_master_%j.output
