@@ -79,7 +79,8 @@ fi
 IFS=',' read -r -a CONTIGS <<< "${CONTIG_LIST}"
 
 rename_map="$(mktemp)"
-trap 'rm -f "${rename_map}"' EXIT
+tmp_dir="$(mktemp -d)"
+trap 'rm -f "${rename_map}"; rm -rf "${tmp_dir}"' EXIT
 
 : > "${rename_map}"
 for c in "${CONTIGS[@]}"; do
@@ -108,11 +109,14 @@ for vcf in "${vcfs[@]}"; do
         continue
     fi
     out="${OUT_DIR%/}/${base}${SUFFIX}.vcf.gz"
+    tmp_unsorted="${tmp_dir}/${base}${SUFFIX}.unsorted.vcf.gz"
     if [[ -f "${out}" && "${FORCE}" != "true" ]]; then
         echo "Skipping existing: ${out} (use --force to overwrite)" >&2
         continue
     fi
     echo "Renaming ${vcf} -> ${out}"
-    bcftools annotate --rename-chrs "${rename_map}" "${vcf}" -Oz -o "${out}"
+    bcftools annotate --rename-chrs "${rename_map}" "${vcf}" -Oz -o "${tmp_unsorted}"
+    # Ensure sorted output to avoid indexing failures on unsorted inputs
+    bcftools sort "${tmp_unsorted}" -Oz -T "${tmp_dir}/bcf_sort" -o "${out}"
     bcftools index -f -c "${out}"
 done
