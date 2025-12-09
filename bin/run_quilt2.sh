@@ -127,6 +127,16 @@ if [[ "${PREP_ONLY}" == "true" && "${IMPUTE_ONLY}" == "true" ]]; then
     exit 1
 fi
 
+WORK_DIR="$(cd "${INPUT_DIR}" && pwd)"
+OUTPUT_DIR="${WORK_DIR%/}/quilt2_output"
+PANEL_OUT_DIR="${OUTPUT_DIR}/panel"
+RDATA_DIR="${OUTPUT_DIR}/RData"
+TMP_DIR="${OUTPUT_DIR}/tmp"
+SLURM_DIR="${WORK_DIR%/}/quilt2_slurm"
+mkdir -p "${OUTPUT_DIR}" "${PANEL_OUT_DIR}" "${RDATA_DIR}" "${TMP_DIR}" "${SLURM_DIR}"
+MISSING_REPORT="${PANEL_OUT_DIR}/missing_sites_removed.tsv"
+NOMISS_FAIL_FLAG="${SLURM_DIR}/quilt2_nomiss_failed.flag"
+
 if [[ "${SUBMIT_SELF}" == "true" && -z "${SLURM_JOB_ID:-}" ]]; then
     MASTER_SCRIPT="${SLURM_DIR}/quilt2_master_$(date +%Y%m%d_%H%M%S).sh"
     {
@@ -159,16 +169,6 @@ EOF
     log_info "SLURM logs:   ${SLURM_DIR}/quilt2_master_%j.(output|error)"
     exit 0
 fi
-
-WORK_DIR="$(cd "${INPUT_DIR}" && pwd)"
-OUTPUT_DIR="${WORK_DIR%/}/quilt2_output"
-PANEL_OUT_DIR="${OUTPUT_DIR}/panel"
-RDATA_DIR="${OUTPUT_DIR}/RData"
-TMP_DIR="${OUTPUT_DIR}/tmp"
-SLURM_DIR="${WORK_DIR%/}/quilt2_slurm"
-mkdir -p "${OUTPUT_DIR}" "${PANEL_OUT_DIR}" "${RDATA_DIR}" "${TMP_DIR}" "${SLURM_DIR}"
-MISSING_REPORT="${PANEL_OUT_DIR}/missing_sites_removed.tsv"
-NOMISS_FAIL_FLAG="${SLURM_DIR}/quilt2_nomiss_failed.flag"
 
 if [[ -z "${REFERENCE_PANEL_DIR}" ]]; then
     for candidate in "${WORK_DIR}/8.Imputated_VCF_BEAGLE" "${WORK_DIR}/7.Consolidated_VCF" "${WORK_DIR}"; do
