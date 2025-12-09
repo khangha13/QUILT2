@@ -150,8 +150,8 @@ REFERENCE_PANEL_DIR="$(cd "${REFERENCE_PANEL_DIR}" && pwd)"
 # Uses bin/standardize_chr_names.sh; outputs stay in the same directory with suffix _chr by default.
 if [[ "${STANDARDISE_NAME}" == "true" ]]; then
     standardiser="${QUILT2_ROOT}/bin/standardize_chr_names.sh"
-    if [[ ! -x "${standardiser}" ]]; then
-        log_error "standardize_chr_names.sh not found or not executable at ${standardiser}"
+    if [[ ! -f "${standardiser}" ]]; then
+        log_error "standardize_chr_names.sh not found at ${standardiser}"
         exit 1
     fi
     ensure_bcftools || exit 1
@@ -160,9 +160,9 @@ if [[ "${STANDARDISE_NAME}" == "true" ]]; then
         std_args+=( --force )
     fi
     if [[ "${DRY_RUN}" == "true" ]]; then
-        echo "+ ${standardiser} ${std_args[*]}"
+        echo "+ bash ${standardiser} ${std_args[*]}"
     else
-        "${standardiser}" "${std_args[@]}"
+        bash "${standardiser}" "${std_args[@]}"
     fi
 fi
 

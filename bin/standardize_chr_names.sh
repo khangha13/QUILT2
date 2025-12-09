@@ -97,6 +97,11 @@ fi
 
 for vcf in "${vcfs[@]}"; do
     base="$(basename "${vcf}" .vcf.gz)"
+    # Skip files that already end with the suffix (to avoid suffix stacking)
+    if [[ "${base}" == *"${SUFFIX}" ]]; then
+        echo "Skipping already-standardized file: ${vcf}" >&2
+        continue
+    fi
     out="${OUT_DIR%/}/${base}${SUFFIX}.vcf.gz"
     if [[ -f "${out}" && "${FORCE}" != "true" ]]; then
         echo "Skipping existing: ${out} (use --force to overwrite)" >&2
