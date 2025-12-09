@@ -79,6 +79,7 @@ STANDARDISE_NAME_FORCE="false"
 BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}"
 QUILT2_CONDA_ENV="${QUILT2_CONDA_ENV:-quilt2}"
 
+SUBMIT_SELF="true"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -i|--input-dir) INPUT_DIR="$2"; shift 2 ;;
@@ -105,6 +106,8 @@ while [[ $# -gt 0 ]]; do
         --dry-run) DRY_RUN="true"; shift ;;
         --standardise-name) STANDARDISE_NAME="true"; shift ;;
         --standardise-name-force) STANDARDISE_NAME_FORCE="true"; shift ;;
+        --submit-self) SUBMIT_SELF="$2"; shift 2 ;;
+        --no-submit|--submit-self=false) SUBMIT_SELF="false"; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
         -*)
@@ -122,6 +125,39 @@ fi
 if [[ "${PREP_ONLY}" == "true" && "${IMPUTE_ONLY}" == "true" ]]; then
     log_error "--prepare-only and --impute-only cannot be used together."
     exit 1
+fi
+
+if [[ "${SUBMIT_SELF}" == "true" && -z "${SLURM_JOB_ID:-}" ]]; then
+    MASTER_SCRIPT="${SLURM_DIR}/quilt2_master_$(date +%Y%m%d_%H%M%S).sh"
+    {
+    cat <<EOF
+#!/bin/bash
+#SBATCH --job-name=Q2_MASTER
+#SBATCH --output=${SLURM_DIR}/quilt2_master_%j.output
+#SBATCH --error=${SLURM_DIR}/quilt2_master_%j.error
+
+export QUILT2_ROOT="${QUILT2_ROOT}"
+
+bash "${QUILT2_ROOT}/bin/run_quilt2.sh" "$@"
+EOF
+    } > "${MASTER_SCRIPT}"
+    chmod +x "${MASTER_SCRIPT}"
+
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        echo "[DRY-RUN] Would submit master: sbatch ${MASTER_SCRIPT}"
+        exit 0
+    fi
+
+    master_job_id="$(sbatch "${MASTER_SCRIPT}" "$@" | awk '{print $4}')"
+    if [[ -z "${master_job_id}" ]]; then
+        log_error "Failed to submit master job."
+        exit 1
+    fi
+    echo "${master_job_id}" > "${SLURM_DIR}/quilt2_master_job_id.txt"
+    log_info "Submitted master job ${master_job_id}"
+    log_info "SLURM script: ${MASTER_SCRIPT}"
+    log_info "SLURM logs:   ${SLURM_DIR}/quilt2_master_%j.(output|error)"
+    exit 0
 fi
 
 WORK_DIR="$(cd "${INPUT_DIR}" && pwd)"

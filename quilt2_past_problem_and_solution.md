@@ -301,6 +301,23 @@ done
 
 ---
 
+## 13. Master self-submit (detaching run_quilt2)
+
+### Problem
+- Running `bin/run_quilt2.sh` directly would block on the login node while Phase 1/2 SLURM jobs ran, unlike the GATK master which self-submits and detaches.
+
+### Solution
+- `bin/run_quilt2.sh` now defaults to self-submit when not already in SLURM:
+  - Adds `--submit-self[=bool]` (default true) and `--no-submit`/`--submit-self=false` to opt out.
+  - Creates `quilt2_slurm/quilt2_master_*.sh`, submits via `sbatch`, records job ID in `quilt2_slurm/quilt2_master_job_id.txt`, prints job ID + SLURM script/log paths, then exits.
+  - When inside SLURM or when self-submit is disabled, runs inline as before.
+
+### Notes
+- DRY-RUN prints the sbatch command and exits without submitting.
+- SLURM logs: `quilt2_slurm/quilt2_master_%j.(output|error)`.
+
+---
+
 ## Summary Checklist
 
 Before running QUILT2 pipeline, verify:
