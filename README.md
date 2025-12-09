@@ -1,2 +1,89 @@
-# QUILT2
-Pipeline for imputing using apple database
+# QUILT2 Pipeline (KH v1)
+
+SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C array pattern from the GATK workflow.
+
+## Layout
+- `bin/run_quilt2.sh` – orchestrator; builds chunk manifest, generates SLURM array script.
+- `templates/quilt2_job.sh` – array worker; processes one chunk (prepare + impute).
+- `lib/functions.sh` – shared helpers (env bootstrap, bcftools/QUILT checks, panel/map resolution).
+- `config/quilt2_config.sh` – SLURM defaults (account/partition/qos/resources/array cap).
+- `quilt2_pipeline.legacy.sh` – pre-array monolithic script (kept only for rollback).
+- `quilt2_past_problem_and_solution.md` – troubleshooting history.
+
+## Prerequisites
+- Bash, SLURM.
+- `Rscript` with QUILT2 scripts available (`QUILT2_prepare_reference.R`, `QUILT2.R`) via `--quilt2-home` or explicit `--quilt2-*` paths.
+- `bcftools` on PATH or loadable via `BCFTOOLS_MODULE` (default `bcftools/1.18-gcc-12.3.0`).
+- Optional: conda env name via `QUILT2_CONDA_ENV` (default `quilt2`); module `miniforge/25.3.0-3` loaded if present.
+
+## Inputs
+- `--input-dir` (`WORK_DIR`) containing:
+  - Panel VCFs under `8.Imputated_VCF_BEAGLE/` (preferred) or `7.Consolidated_VCF/`; otherwise `WORK_DIR` is searched.
+  - `bamlist.txt` (or `bamlist.1.0.txt` / `bamlist.tsv`) unless running `--prepare-only`; **still required for `--impute-only`**.
+- Genetic map: `--genetic-map` file or directory with per-chromosome maps. Names must match `--chr` values (`Chr01` vs `1`, etc.).
+- Reference panel should be **phased**; use `--remove-missing` with `--min-phased-rate` if needed.
+- Ensure VCFs are indexed (`.tbi/.csi`).
+
+## Quick Start
+Full run (auto chunks from genetic map directory):
+```bash
+bash bin/run_quilt2.sh \
+  -i /path/to/work_dir \
+  --genetic-map /path/to/genetic_maps_dir \
+  --auto-chunk-map \
+  --remove-missing --min-phased-rate 0.95
+```
+
+Fixed region for all chromosomes:
+```bash
+bash bin/run_quilt2.sh \
+  -i /path/to/work_dir \
+  --genetic-map /path/to/genetic_maps_dir \
+  --region-start 1 --region-end 5000000
+```
+
+Impute-only (prepared references already exist):
+```bash
+bash bin/run_quilt2.sh \
+  -i /path/to/work_dir \
+  --genetic-map /path/to/genetic_maps_dir \
+  --impute-only \
+  --region-start 1 --region-end 5000000
+```
+
+Dry-run (generate SLURM script, no submission):
+```bash
+bash bin/run_quilt2.sh ... --dry-run
+```
+
+Remove-missing toggle:
+```bash
+  --remove-missing --min-phased-rate 0.9   # keep variants with >=90% phased
+```
+
+Point to QUILT2 scripts:
+```bash
+  --quilt2-home /path/to/QUILT2_scripts
+# or
+  --quilt2-prepare-script /path/to/QUILT2_prepare_reference.R \
+  --quilt2-run-script /path/to/QUILT2.R
+```
+
+SLURM overrides (env, matches Step1C style):
+```bash
+export QUILT2_ACCOUNT=youracct
+export QUILT2_PARTITION=compute
+export QUILT2_QOS=normal
+export QUILT2_CPUS_PER_TASK=8
+export QUILT2_MEMORY=48G
+export QUILT2_TIME_LIMIT=12:00:00
+export QUILT2_ARRAY_MAX=0   # 0 = no cap
+```
+
+Cache awareness (when changing inputs/settings):
+- Remove cached chunks: `rm -f quilt2_output/tmp/quilt_auto_chunks.tsv`
+- Remove filtered panels: `rm -f quilt2_output/panel/quilt.nomiss.*`
+- Remove prepared references: `rm -f quilt2_output/RData/QUILT_prepared_reference.*`
+
+## Troubleshooting
+See `quilt2_past_problem_and_solution.md` for fixes on genetic map columns, chr naming, symlinks, chunk parsing, phased panel requirements, and cache invalidation. Use `--dry-run` first to ensure SLURM script generation succeeds before submitting.

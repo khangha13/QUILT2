@@ -17,8 +17,8 @@ DEFAULT_CHROMS=(Chr01 Chr02 Chr03 Chr04 Chr05 Chr06 Chr07 Chr08 Chr09 Chr10 Chr1
 DEFAULT_BUFFER=500000
 DEFAULT_NGEN=100
 
-log_info() { echo "[INFO] $*"; }
-log_warn() { echo "[WARN] $*"; }
+log_info() { echo "[INFO] $*" >&2; }
+log_warn() { echo "[WARN] $*" >&2; }
 log_error() { echo "[ERROR] $*" >&2; }
 
 usage() {
@@ -30,7 +30,9 @@ Usage:
 
 Required:
   -i, --input-dir PATH        Working folder (all outputs stay here).
-  --genetic-map PATH          Genetic map file (or set QUILT2_GENETIC_MAP).
+  --genetic-map PATH          Genetic map file OR directory containing per-chromosome maps.
+                              If a directory, expects files like: Chr01.map, genetic_map.Chr01.txt, etc.
+                              Can also set via QUILT2_GENETIC_MAP environment variable.
 
 Region specification (one of the following):
   --auto-chunk-map            Derive chunks automatically using QUILT::quilt_chunk_map (requires QUILT R pkg).
@@ -54,7 +56,10 @@ Reference/panel options:
   --quilt2-run-script PATH      Override path to QUILT2.R.
   --truth-vcf PATH            Optional truth VCF for evaluation (vcfppR); contigs must match outputs.
   --eval-output PATH          Optional evaluation output directory (default: <work_dir>/quilt2_output/eval).
-  --remove-missing            Drop variants where all genotypes are missing (default: false).
+  --remove-missing            Filter variants: keep only those with ≥95% phased genotypes (default: false).
+                              Use --min-phased-rate to adjust the threshold.
+  --min-phased-rate FLOAT     Minimum fraction of samples with phased genotypes (0.0-1.0, default: 0.95).
+                              Variants below this threshold are removed when --remove-missing is set.
   --prepare-only              Stop after QUILT2_prepare_reference.R.
   --impute-only               Assume prepared reference exists; skip prepare step.
 
@@ -89,6 +94,7 @@ EVAL_OUTPUT_DIR=""
 QUILT2_CONDA_ENV="${QUILT2_CONDA_ENV:-quilt2}"
 MISSING_REPORT=""
 REMOVE_MISSING="false"
+MIN_PHASED_RATE="0.95"
 PREP_ONLY="false"
 IMPUTE_ONLY="false"
 DRY_RUN="false"
@@ -132,6 +138,8 @@ while [[ $# -gt 0 ]]; do
             EVAL_OUTPUT_DIR="$2"; shift 2 ;;
         --remove-missing)
             REMOVE_MISSING="true"; shift ;;
+        --min-phased-rate)
+            MIN_PHASED_RATE="$2"; shift 2 ;;
         --prepare-only)
             PREP_ONLY="true"; shift ;;
         --impute-only)
@@ -190,6 +198,20 @@ REFERENCE_PANEL_DIR="$(cd "${REFERENCE_PANEL_DIR}" && pwd)"
 
 if [[ -z "${GENETIC_MAP_FILE}" ]]; then
     log_error "Genetic map is required (--genetic-map or set QUILT2_GENETIC_MAP)."
+    exit 1
+fi
+
+# Determine if genetic map is a file or directory
+GENETIC_MAP_IS_DIR="false"
+if [[ -d "${GENETIC_MAP_FILE}" ]]; then
+    GENETIC_MAP_IS_DIR="true"
+    GENETIC_MAP_DIR="$(cd "${GENETIC_MAP_FILE}" && pwd)"
+    log_info "Genetic map directory: ${GENETIC_MAP_DIR}"
+elif [[ -f "${GENETIC_MAP_FILE}" ]]; then
+    GENETIC_MAP_DIR=""
+    log_info "Genetic map file: ${GENETIC_MAP_FILE}"
+else
+    log_error "Genetic map not found: ${GENETIC_MAP_FILE} (expected file or directory)"
     exit 1
 fi
 
@@ -338,10 +360,43 @@ if [[ ! -f "${QUILT2_RUN_SCRIPT}" ]]; then
     exit 1
 fi
 
-if [[ ! -f "${GENETIC_MAP_FILE}" ]]; then
-    log_error "Genetic map not found: ${GENETIC_MAP_FILE}"
-    exit 1
-fi
+# Resolve genetic map file for a specific chromosome.
+# If GENETIC_MAP_IS_DIR=true, searches for chr-specific file in directory.
+# Otherwise returns the single GENETIC_MAP_FILE.
+resolve_genetic_map() {
+    local chr="$1"
+    if [[ "${GENETIC_MAP_IS_DIR}" == "true" ]]; then
+        # Search for per-chromosome map file with common naming patterns
+        local -a patterns=(
+            "${GENETIC_MAP_DIR}/${chr}.map"
+            "${GENETIC_MAP_DIR}/${chr}.txt"
+            "${GENETIC_MAP_DIR}/${chr}.txt.gz"
+            "${GENETIC_MAP_DIR}/genetic_map.${chr}.txt"
+            "${GENETIC_MAP_DIR}/genetic_map.${chr}.txt.gz"
+            "${GENETIC_MAP_DIR}/genetic_map_${chr}.txt"
+            "${GENETIC_MAP_DIR}/genetic_map_${chr}.txt.gz"
+            "${GENETIC_MAP_DIR}/${chr}_genetic_map.txt"
+            "${GENETIC_MAP_DIR}/${chr}_genetic_map.txt.gz"
+        )
+        # Also try glob for any file containing the chromosome name
+        local -a globbed=()
+        while IFS= read -r path; do
+            globbed+=( "${path}" )
+        done < <(find "${GENETIC_MAP_DIR}" -maxdepth 1 -type f \( -name "*${chr}*.txt" -o -name "*${chr}*.txt.gz" -o -name "*${chr}*.map" \) 2>/dev/null | head -1)
+        patterns+=( "${globbed[@]}" )
+
+        for candidate in "${patterns[@]}"; do
+            if [[ -f "${candidate}" ]]; then
+                echo "${candidate}"
+                return 0
+            fi
+        done
+        log_error "Genetic map for ${chr} not found in ${GENETIC_MAP_DIR}"
+        exit 1
+    else
+        echo "${GENETIC_MAP_FILE}"
+    fi
+}
 
 readarray -t CHR_LIST <<< "$(printf "%s\n" "${DEFAULT_CHROMS[@]}")"
 if [[ -n "${CHROM_ARG}" ]]; then
@@ -398,14 +453,29 @@ if [[ -z "${CHUNK_FILE}" && "${AUTO_CHUNK_MAP}" == "true" ]]; then
     fi
     CHUNK_FILE="${TMP_DIR%/}/quilt_auto_chunks.tsv"
     log_info "Auto-deriving chunks with QUILT::quilt_chunk_map into ${CHUNK_FILE}"
+
+    # Build a comma-separated list of chr:mapfile pairs for the R script
+    chr_map_pairs=""
+    for chr in "${CHR_LIST[@]}"; do
+        chr_map="$(resolve_genetic_map "${chr}")"
+        if [[ -n "${chr_map_pairs}" ]]; then
+            chr_map_pairs="${chr_map_pairs};"
+        fi
+        chr_map_pairs="${chr_map_pairs}${chr}:${chr_map}"
+    done
+
     r_cmd=$(cat <<'RSCRIPT'
 args <- commandArgs(trailingOnly = TRUE)
-map_file <- args[[1]]
-out_file <- args[[2]]
-chroms <- strsplit(args[[3]], ",")[[1]]
+out_file <- args[[1]]
+chr_map_pairs <- args[[2]]
 suppressMessages(library(QUILT))
-rows <- list()
-for (chr in chroms) {
+lines <- c()
+# Parse chr:mapfile pairs separated by ;
+pairs <- strsplit(chr_map_pairs, ";")[[1]]
+for (pair in pairs) {
+  parts <- strsplit(pair, ":")[[1]]
+  chr <- parts[1]
+  map_file <- paste(parts[-1], collapse = ":")  # Handle paths with colons
   dat <- QUILT::quilt_chunk_map(chr, map_file)
   if (!all(c("chunk","chr","region") %in% names(dat))) {
     stop("quilt_chunk_map output missing required columns for chr ", chr)
@@ -413,16 +483,18 @@ for (chr in chroms) {
   for (i in seq_len(nrow(dat))) {
     reg <- dat$region[i]
     # region format like "chr:start-end"
-    parts <- unlist(strsplit(reg, "[:-]"))
-    if (length(parts) != 3) stop("Unexpected region format: ", reg)
-    rows[[length(rows) + 1]] <- c(dat$chunk[i], parts[1], parts[2], parts[3])
+    reg_parts <- unlist(strsplit(reg, "[:-]"))
+    if (length(reg_parts) != 3) stop("Unexpected region format: ", reg)
+    # Convert coordinates to integers and format explicitly to avoid scientific notation
+    start_int <- as.integer(as.numeric(reg_parts[2]))
+    end_int <- as.integer(as.numeric(reg_parts[3]))
+    lines <- c(lines, sprintf("%s\t%s\t%d\t%d", dat$chunk[i], reg_parts[1], start_int, end_int))
   }
 }
-df <- do.call(rbind, rows)
-write.table(df, file = out_file, sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+writeLines(lines, out_file)
 RSCRIPT
 )
-    run_cmd Rscript - "${GENETIC_MAP_FILE}" "${CHUNK_FILE}" "$(IFS=','; echo "${CHR_LIST[*]}")" <<< "${r_cmd}"
+    run_cmd Rscript - "${CHUNK_FILE}" "${chr_map_pairs}" <<< "${r_cmd}"
 fi
 
 if [[ -n "${CHUNK_FILE}" ]]; then
@@ -438,11 +510,21 @@ if [[ -n "${CHUNK_FILE}" ]]; then
         if [[ "${lc1}" == "chr" || "${lc1}" == "chrom" || "${lc1}" == "chunk" ]]; then
             continue
         fi
+        # Detect format based on column patterns:
+        # Format A: "chr start end [buffer]" - c1 is chromosome, c2/c3 are coordinates
+        # Format B: "chunk chr start end [buffer]" - c1 is chunk ID, c2 is chromosome, c3/c4 are coordinates
+        #
+        # Heuristic: if c1 starts with 'chr' or c2 is not a valid coordinate (not purely numeric or too small),
+        # treat as Format A. Otherwise, if c4 looks like a coordinate (large number), treat as Format B.
         if [[ "${lc1}" == chr* ]]; then
-            # Format: chr start end [buffer]
+            # Format A: chr start end [buffer] (chromosome starts with 'chr')
             add_chunk "${c1}_${c2}_${c3}" "${c1}" "${c2}" "${c3}" "${c4:-${BUFFER}}"
         elif [[ "${lc2}" == chr* ]]; then
-            # Format: chunk chr start end [buffer]
+            # Format B: chunk chr start end [buffer] (chromosome starts with 'chr')
+            add_chunk "${c1}" "${c2}" "${c3}" "${c4}" "${c5:-${BUFFER}}"
+        elif [[ "${c4}" =~ ^[0-9]+$ && "${c4}" -gt 1000 ]]; then
+            # Format B: chunk chr start end [buffer] (c4 looks like a coordinate - numeric and large)
+            # This handles numeric chromosome names like "1", "2", etc.
             add_chunk "${c1}" "${c2}" "${c3}" "${c4}" "${c5:-${BUFFER}}"
         else
             # Fallback: assume chr start end [buffer] with non-standard chr naming
@@ -451,7 +533,10 @@ if [[ -n "${CHUNK_FILE}" ]]; then
     done < "${CHUNK_FILE}"
 else
     if [[ -z "${REGION_END}" ]]; then
-        log_error "Provide --region-end or a --chunk-file."
+        log_error "No region specification provided. Use one of:"
+        log_error "  --auto-chunk-map           (derive chunks from genetic map)"
+        log_error "  --chunk-file <file.tsv>    (provide explicit chunks)"
+        log_error "  --region-end <bp>          (use same region for all chromosomes)"
         exit 1
     fi
     for chr in "${CHR_LIST[@]}"; do
@@ -523,9 +608,11 @@ pick_panel_vcf() {
         "${REFERENCE_PANEL_DIR}/${chr}.vcf.gz"
     )
     local -a globbed=()
+    # Use patterns with separators to avoid matching chr1 with chr10, chr11, etc.
+    # Match: chr_*, chr.*, chr-* patterns
     while IFS= read -r path; do
         globbed+=( "${path}" )
-    done < <(find "${REFERENCE_PANEL_DIR}" -maxdepth 1 -type f -name "${chr}*.vcf.gz" 2>/dev/null | sort)
+    done < <(find "${REFERENCE_PANEL_DIR}" -maxdepth 1 \( -type f -o -type l \) \( -name "${chr}_*.vcf.gz" -o -name "${chr}.*.vcf.gz" -o -name "${chr}-*.vcf.gz" \) 2>/dev/null | sort)
     candidates+=( "${globbed[@]}" )
 
     for candidate in "${candidates[@]}"; do
@@ -587,11 +674,15 @@ normalize_panel_vcf() {
 
     local cleaned_vcf="${PANEL_OUT_DIR}/quilt.nomiss.${chr}.vcf.gz"
 
+    # Filter expression: keep variants where ≥MIN_PHASED_RATE of samples have phased genotypes (contain "|")
+    # This removes variants with too many missing or unphased genotypes
+    local filter_expr='COUNT(GT~"[|]") >= '"${MIN_PHASED_RATE}"' * N_SAMPLES'
+
     if [[ "${DRY_RUN}" == "true" ]]; then
         cat <<EOF
 + bcftools view -H "${invcf}" | wc -l    # total variants
-+ bcftools view -e 'COUNT(GT!=".|.")>0' -H "${invcf}" | wc -l    # removed (all missing)
-+ bcftools view -i 'COUNT(GT!=".|.")>0' "${invcf}" -Oz -o "${cleaned_vcf}"
++ bcftools view -e '${filter_expr}' -H "${invcf}" | wc -l    # removed (below ${MIN_PHASED_RATE} phased rate)
++ bcftools view -i '${filter_expr}' "${invcf}" -Oz -o "${cleaned_vcf}"
 + bcftools index -f -c "${cleaned_vcf}"
 EOF
         echo "${cleaned_vcf}"
@@ -599,20 +690,20 @@ EOF
     fi
 
     if [[ ! -f "${cleaned_vcf}" ]]; then
-        local total missing kept
+        local total removed kept
         total=$(bcftools view -H "${invcf}" | wc -l | awk '{print $1}')
-        missing=$(bcftools view -e 'COUNT(GT!=".|.")>0' -H "${invcf}" | wc -l | awk '{print $1}')
-        if ! bcftools view -i 'COUNT(GT!=".|.")>0' "${invcf}" -Oz -o "${cleaned_vcf}"; then
-            log_error "bcftools filter (remove all-missing genotypes) failed for ${invcf}"
+        removed=$(bcftools view -e "${filter_expr}" -H "${invcf}" | wc -l | awk '{print $1}')
+        if ! bcftools view -i "${filter_expr}" "${invcf}" -Oz -o "${cleaned_vcf}"; then
+            log_error "bcftools filter (min phased rate ${MIN_PHASED_RATE}) failed for ${invcf}"
             exit 1
         fi
         run_cmd bcftools index -f -c "${cleaned_vcf}"
-        kept=$((total - missing))
+        kept=$((total - removed))
         if [[ ! -f "${MISSING_REPORT}" ]]; then
-            echo -e "chromosome\tinput_vcf\tremoved_all_missing\tkept_variants\toutput_vcf" > "${MISSING_REPORT}"
+            echo -e "chromosome\tinput_vcf\ttotal\tremoved\tkept\tmin_phased_rate\toutput_vcf" > "${MISSING_REPORT}"
         fi
-        echo -e "${chr}\t${invcf}\t${missing}\t${kept}\t${cleaned_vcf}" >> "${MISSING_REPORT}"
-        log_info "Removed ${missing} all-missing variants; kept ${kept}. Cleaned: ${cleaned_vcf}"
+        echo -e "${chr}\t${invcf}\t${total}\t${removed}\t${kept}\t${MIN_PHASED_RATE}\t${cleaned_vcf}" >> "${MISSING_REPORT}"
+        log_info "Filtered ${chr}: ${removed}/${total} variants removed (below ${MIN_PHASED_RATE} phased rate); ${kept} kept. Output: ${cleaned_vcf}"
     else
         log_info "Cleaned panel already exists for ${chr}: ${cleaned_vcf}"
     fi
@@ -646,8 +737,10 @@ prepare_reference_chunk() {
     fi
 
     log_info "Preparing reference for ${chr}:${start}-${end}"
+    local chr_map_file
+    chr_map_file="$(resolve_genetic_map "${chr}")"
     local cmd=(Rscript "${QUILT2_PREP_SCRIPT}"
-        "--genetic_map_file=${GENETIC_MAP_FILE}"
+        "--genetic_map_file=${chr_map_file}"
         "--reference_vcf_file=${panel_vcf}"
         "--chr=${chr}"
         "--regionStart=${start}"
@@ -708,7 +801,11 @@ impute_chunk() {
 log_info "Working directory: ${WORK_DIR}"
 log_info "Panel dir: ${REFERENCE_PANEL_DIR}"
 log_info "Output dir: ${OUTPUT_DIR}"
-log_info "Genetic map: ${GENETIC_MAP_FILE}"
+if [[ "${GENETIC_MAP_IS_DIR}" == "true" ]]; then
+    log_info "Genetic map: ${GENETIC_MAP_DIR} (per-chromosome)"
+else
+    log_info "Genetic map: ${GENETIC_MAP_FILE}"
+fi
 if [[ -n "${REFERENCE_FASTA}" ]]; then
     log_info "Reference FASTA (validation only): ${REFERENCE_FASTA}"
 fi
