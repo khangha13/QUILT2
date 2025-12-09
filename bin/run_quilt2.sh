@@ -52,6 +52,7 @@ DEFAULT_CHROMS=(Chr01 Chr02 Chr03 Chr04 Chr05 Chr06 Chr07 Chr08 Chr09 Chr10 Chr1
 DEFAULT_BUFFER=500000
 DEFAULT_NGEN=100
 
+ORIG_ARGS=("$@")
 INPUT_DIR=""
 REFERENCE_PANEL_DIR=""
 GENETIC_MAP_FILE="${QUILT2_GENETIC_MAP:-}"
@@ -140,7 +141,7 @@ NOMISS_FAIL_FLAG="${SLURM_DIR}/quilt2_nomiss_failed.flag"
 if [[ "${SUBMIT_SELF}" == "true" && -z "${SLURM_JOB_ID:-}" ]]; then
     MASTER_SCRIPT="${SLURM_DIR}/quilt2_master_$(date +%Y%m%d_%H%M%S).sh"
     {
-    cat <<EOF
+    cat <<'EOF'
 #!/bin/bash
 #SBATCH --job-name=Q2_MASTER
 #SBATCH --output=${SLURM_DIR}/quilt2_master_%j.output
@@ -158,7 +159,7 @@ EOF
         exit 0
     fi
 
-    master_job_id="$(sbatch "${MASTER_SCRIPT}" "$@" | awk '{print $4}')"
+    master_job_id="$(sbatch "${MASTER_SCRIPT}" "${ORIG_ARGS[@]}" | awk '{print $4}')"
     if [[ -z "${master_job_id}" ]]; then
         log_error "Failed to submit master job."
         exit 1
