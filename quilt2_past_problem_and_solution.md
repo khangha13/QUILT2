@@ -318,6 +318,28 @@ done
 
 ---
 
+## 14. Phase 1 failures: env not loaded + standardise-only validation
+
+### Symptoms
+- Master: `Cannot locate quilt2_prepare (QUILT2_prepare_reference.R). Set --quilt2-prepare-script or --quilt2-home.`
+- Phase 1 task (standardise-only): `Filtered VCF missing or empty for ChrXX: <empty>` even though `--remove-missing` was **not** set.
+
+### Causes
+- The master resolved `QUILT2_prepare_reference.R` before the conda env was activated, so scripts provided by the env were not found.
+- Phase 1 validation always expected a “filtered” VCF, even when only `--standardise-name` was requested, so `cleaned_vcf` was empty and validation failed.
+
+### Fixes
+- Load the conda env at the start of `bin/run_quilt2.sh` so `QUILT2_prepare_reference.R`/`QUILT2.R` are on PATH before resolution (or set `--quilt2-home`/`--quilt2-prepare-script` explicitly).
+- In `templates/quilt2_nomiss_job.sh`:
+  - Treat the standardised (or original) VCF as the Phase 1 output when `--remove-missing` is **false**; only expect `quilt.nomiss.*` when the flag is **true**.
+  - Sort and re-index standardised VCFs before validation; if an existing `_chr` VCF cannot be indexed, rebuild it.
+
+### Notes for future runs
+- Ensure the quilt2 conda env is activated (or `--quilt2-home`/`--quilt2-*-script` are set) so the prepare/impute scripts are locatable.
+- For standardise-only runs, Phase 1 success is defined by the presence of `<chr>_chr.vcf.gz` (+ index), not `quilt.nomiss.*`.
+
+---
+
 ## Summary Checklist
 
 Before running QUILT2 pipeline, verify:

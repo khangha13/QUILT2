@@ -316,6 +316,10 @@ load_quilt_env() {
     fi
 }
 
+if command -v module >/dev/null 2>&1; then
+    module purge
+fi
+
 load_quilt_env
 
 ensure_bcftools

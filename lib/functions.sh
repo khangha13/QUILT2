@@ -24,6 +24,10 @@ require_cmd() {
     fi
 }
 
+if command -v module >/dev/null 2>&1; then
+    module purge
+fi
+
 ensure_bcftools() {
     # Load bcftools if absent; uses BCFTOOLS_MODULE default from orchestrator
     if command -v bcftools >/dev/null 2>&1; then
