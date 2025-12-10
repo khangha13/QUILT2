@@ -140,6 +140,7 @@ NOMISS_FAIL_FLAG="${SLURM_DIR}/quilt2_nomiss_failed.flag"
 
 if [[ "${SUBMIT_SELF}" == "true" && -z "${SLURM_JOB_ID:-}" ]]; then
     MASTER_SCRIPT="${SLURM_DIR}/quilt2_master_$(date +%Y%m%d_%H%M%S).sh"
+    args_quoted="$(printf " %q" "${ORIG_ARGS[@]}")"
     {
     cat <<EOF
 #!/bin/bash
@@ -149,7 +150,7 @@ if [[ "${SUBMIT_SELF}" == "true" && -z "${SLURM_JOB_ID:-}" ]]; then
 
 export QUILT2_ROOT="${QUILT2_ROOT}"
 
-bash "${QUILT2_ROOT}/bin/run_quilt2.sh" "$@"
+bash "${QUILT2_ROOT}/bin/run_quilt2.sh"${args_quoted}
 EOF
     } > "${MASTER_SCRIPT}"
     chmod +x "${MASTER_SCRIPT}"
@@ -159,7 +160,7 @@ EOF
         exit 0
     fi
 
-    master_job_id="$(sbatch "${MASTER_SCRIPT}" "${ORIG_ARGS[@]}" | awk '{print $4}')"
+    master_job_id="$(sbatch "${MASTER_SCRIPT}" | awk '{print $4}')"
     if [[ -z "${master_job_id}" ]]; then
         log_error "Failed to submit master job."
         exit 1

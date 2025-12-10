@@ -93,9 +93,14 @@ standardize_panel_vcf() {
     local dest="${out_dir%/}/${chr}${suffix}.vcf.gz"
 
     if [[ -f "${dest}" && "${force}" != "true" ]]; then
-        log_info "Standardised VCF already exists for ${chr}: ${dest}"
-        echo "${dest}"
-        return 0
+        if bcftools index -f -c "${dest}" >/dev/null 2>&1; then
+            log_info "Standardised VCF already exists for ${chr}: ${dest}"
+            echo "${dest}"
+            return 0
+        else
+            log_warn "Existing standardised VCF for ${chr} is not sortable/indexable; rebuilding with --standardise-name-force semantics."
+            force="true"
+        fi
     fi
 
     # Build a simple rename map 1..17 -> Chr01..Chr17 (matches apple panel); already-Chr contigs remain unchanged.
@@ -109,7 +114,7 @@ standardize_panel_vcf() {
 
     if [[ "${DRY_RUN}" == "true" ]]; then
         cat <<EOF
-+ bcftools annotate --rename-chrs "${rename_map}" "${src}" -Oz -o "${dest}"
++ bcftools annotate --rename-chrs "${rename_map}" "${src}" | bcftools sort -Oz -o "${dest}"
 + bcftools index -f -c "${dest}"
 EOF
         echo "${dest}"
@@ -117,8 +122,17 @@ EOF
     fi
 
     log_info "Standardising ${chr}: ${src} -> ${dest}"
-    bcftools annotate --rename-chrs "${rename_map}" "${src}" -Oz -o "${dest}"
-    bcftools index -f -c "${dest}"
+    tmp_sorted="${dest}.sorted.tmp.vcf.gz"
+    rm -f "${tmp_sorted}" "${dest}"
+    if ! bcftools annotate --rename-chrs "${rename_map}" "${src}" | bcftools sort -Oz -o "${tmp_sorted}"; then
+        log_error "Failed to standardise+sort ${chr}"
+        return 1
+    fi
+    mv "${tmp_sorted}" "${dest}"
+    if ! bcftools index -f -c "${dest}"; then
+        log_error "Indexing failed for standardised VCF ${dest}"
+        return 1
+    fi
     echo "${dest}"
 }
 
