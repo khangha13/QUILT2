@@ -8,6 +8,7 @@ export QUILT2_ROOT
 
 source "${QUILT2_ROOT}/lib/functions.sh"
 source "${QUILT2_ROOT}/config/quilt2_config.sh"
+load_quilt_env || true
 
 usage() {
     cat <<'EOF'

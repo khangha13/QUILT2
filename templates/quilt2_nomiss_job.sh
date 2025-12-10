@@ -145,29 +145,30 @@ fi
 cleaned_vcf=""
 if [[ "${REMOVE_MISSING}" == "true" ]]; then
     cleaned_vcf="$(normalize_panel_vcf "${CHR}" "${panel_source_dir}")"
+else
+    # No filtering requested; use the standardised (or original) panel as the output for downstream steps.
+    cleaned_vcf="${panel_source_dir%/}/${CHR}${STANDARDISE_SUFFIX}.vcf.gz"
+    if [[ ! -f "${cleaned_vcf}" ]]; then
+        cleaned_vcf="$(pick_panel_vcf "${panel_source_dir}" "${CHR}")"
+    fi
 fi
 
 # If remove-missing not requested, still ensure the source panel is indexed.
 if [[ "${REMOVE_MISSING}" != "true" ]]; then
-    src_for_index="${panel_source_dir%/}/${CHR}${STANDARDISE_SUFFIX}.vcf.gz"
-    if [[ ! -f "${src_for_index}" ]]; then
-        # fallback to any panel pick
-        src_for_index="$(pick_panel_vcf "${panel_source_dir}" "${CHR}")"
-    fi
-    if [[ -n "${src_for_index}" && -f "${src_for_index}" && "${DRY_RUN}" != "true" ]]; then
-        if [[ "${src_for_index}" =~ \.vcf\.gz$ ]]; then
-            bcftools index -f -c "${src_for_index}"
+    if [[ -n "${cleaned_vcf}" && -f "${cleaned_vcf}" && "${DRY_RUN}" != "true" ]]; then
+        if [[ "${cleaned_vcf}" =~ \.vcf\.gz$ ]]; then
+            bcftools index -f -c "${cleaned_vcf}"
         fi
     fi
 fi
 
 if [[ "${DRY_RUN}" != "true" ]]; then
     if [[ -z "${cleaned_vcf}" || ! -s "${cleaned_vcf}" ]]; then
-        log_error "Filtered VCF missing or empty for ${CHR}: ${cleaned_vcf:-<empty>}"
+        log_error "Panel VCF missing or empty for ${CHR}: ${cleaned_vcf:-<empty>}"
         exit 1
     fi
     if [[ ! -f "${cleaned_vcf}.csi" && ! -f "${cleaned_vcf}.tbi" ]]; then
-        log_error "Index for filtered VCF missing for ${CHR}: ${cleaned_vcf}(.csi|.tbi)"
+        log_error "Index for panel VCF missing for ${CHR}: ${cleaned_vcf}(.csi|.tbi)"
         exit 1
     fi
 fi
