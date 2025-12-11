@@ -96,3 +96,17 @@ Cache awareness (when changing inputs/settings):
 
 ## Troubleshooting
 See `quilt2_past_problem_and_solution.md` for fixes on genetic map columns, chr naming, symlinks, chunk parsing, phased panel requirements, and cache invalidation. Use `--dry-run` first to ensure SLURM script generation succeeds before submitting.
+
+## Concordance & dosage r2 (imputed vs truth)
+- Utility: `utils/dosage_r2.sh` (bash) + `utils/dosage_r2.R` (R/data.table/ggplot2). Loads `miniforge/25.3.0-3` and bcftools; activates `QUILT2_CONDA_ENV` when available.
+- Inputs: imputed VCF with `DS` (or `GP` fallback) and truth VCF with `GT`; both indexed. Samples default to the intersection; supply `--samples` to override.
+- Behavior: intersects sites allele-aware (`bcftools isec`), restricts to biallelic SNPs by default, extracts DS/GP and GT, computes per-variant r2 and genotype concordance, plus MAF-binned summaries; optional plots via R.
+- Example:
+```bash
+bash utils/dosage_r2.sh \
+  --imputed /path/imputed.vcf.gz \
+  --truth /path/truth.vcf.gz \
+  --out-prefix results/dosage_eval \
+  --region chr1 \
+  --samples common_samples.txt
+```
