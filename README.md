@@ -16,6 +16,12 @@ SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C 
 - `bcftools` on PATH or loadable via `BCFTOOLS_MODULE` (default `bcftools/1.18-gcc-12.3.0`).
 - Optional: conda env name via `QUILT2_CONDA_ENV` (default `quilt2`); module `miniforge/25.3.0-3` loaded if present.
 
+## Configuration (environment.sh)
+- Copy `config/environment.template.sh` to `config/environment.sh` and set site defaults (scratch/log roots, reference FASTA, genetic map path, panel dir).
+- SLURM defaults: `QUILT2_ACCOUNT`, `QUILT2_PARTITION`, `QUILT2_QOS`, `QUILT2_CPUS_PER_TASK`, `QUILT2_MEMORY`, `QUILT2_TIME_LIMIT`, `QUILT2_ARRAY_LIMIT` (0=no cap), `QUILT2_CONSTRAINT` (optional).
+- Tooling: `BCFTOOLS_MODULE`, `QUILT2_CONDA_ENV`, optional `QUILT2_HOME`/`QUILT2_PREP_SCRIPT`/`QUILT2_RUN_SCRIPT`.
+- Behavior toggles: `QUILT2_CHROMS`, `QUILT2_BUFFER`, `QUILT2_NGEN`, `QUILT2_AUTO_CHUNK_MAP`, `QUILT2_CHUNK_FILE`, `QUILT2_REGION_START/END`, `QUILT2_REMOVE_MISSING`, `QUILT2_MIN_PHASED_RATE`, `QUILT2_STANDARDISE_NAME`, `QUILT2_STANDARDISE_NAME_FORCE`, `QUILT2_PREP_ONLY`, `QUILT2_IMPUTE_ONLY`, `QUILT2_DRY_RUN`, `QUILT2_BAMLIST`.
+
 ## Inputs
 - `--input-dir` (`WORK_DIR`) containing:
   - Panel VCFs under `8.Imputated_VCF_BEAGLE/` (preferred) or `7.Consolidated_VCF/`; otherwise `WORK_DIR` is searched.
@@ -77,7 +83,8 @@ export QUILT2_QOS=normal
 export QUILT2_CPUS_PER_TASK=8
 export QUILT2_MEMORY=48G
 export QUILT2_TIME_LIMIT=12:00:00
-export QUILT2_ARRAY_MAX=0   # 0 = no cap
+export QUILT2_ARRAY_LIMIT=0   # 0 = no cap
+export QUILT2_CONSTRAINT=epyc4
 ```
 
 ## Execution model (self-submit + phases)

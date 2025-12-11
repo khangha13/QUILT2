@@ -6,6 +6,19 @@ ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QUILT2_ROOT="$(cd "${ORCH_DIR}/.." && pwd)"
 export QUILT2_ROOT
 
+ENV_FILE="${QUILT2_ROOT}/config/environment.sh"
+ENV_TEMPLATE="${QUILT2_ROOT}/config/environment.template.sh"
+if [[ -f "${ENV_FILE}" ]]; then
+    # shellcheck source=/dev/null
+    source "${ENV_FILE}"
+elif [[ -f "${ENV_TEMPLATE}" ]]; then
+    # shellcheck source=/dev/null
+    source "${ENV_TEMPLATE}"
+else
+    echo "[run_quilt2] ERROR: Missing config/environment.sh and template at ${ENV_TEMPLATE}" >&2
+    exit 1
+fi
+
 source "${QUILT2_ROOT}/lib/functions.sh"
 source "${QUILT2_ROOT}/config/quilt2_config.sh"
 load_quilt_env || true
@@ -49,35 +62,39 @@ SLURM config (env-driven; see config/quilt2_config.sh):
 EOF
 }
 
-DEFAULT_CHROMS=(Chr01 Chr02 Chr03 Chr04 Chr05 Chr06 Chr07 Chr08 Chr09 Chr10 Chr11 Chr12 Chr13 Chr14 Chr15 Chr16 Chr17)
-DEFAULT_BUFFER=500000
-DEFAULT_NGEN=100
+if [[ -n "${QUILT2_CHROMS:-}" ]]; then
+    IFS=', ' read -r -a DEFAULT_CHROMS <<< "${QUILT2_CHROMS}"
+else
+    DEFAULT_CHROMS=(Chr01 Chr02 Chr03 Chr04 Chr05 Chr06 Chr07 Chr08 Chr09 Chr10 Chr11 Chr12 Chr13 Chr14 Chr15 Chr16 Chr17)
+fi
+DEFAULT_BUFFER="${QUILT2_BUFFER:-500000}"
+DEFAULT_NGEN="${QUILT2_NGEN:-100}"
 
 ORIG_ARGS=("$@")
 INPUT_DIR=""
-REFERENCE_PANEL_DIR=""
+REFERENCE_PANEL_DIR="${QUILT2_REFERENCE_PANEL_DIR:-}"
 GENETIC_MAP_FILE="${QUILT2_GENETIC_MAP:-}"
-REFERENCE_FASTA="${PIPELINE_REFERENCE_FASTA:-}"
-BAMLIST=""
+REFERENCE_FASTA="${QUILT2_REFERENCE_FASTA:-${PIPELINE_REFERENCE_FASTA:-}}"
+BAMLIST="${QUILT2_BAMLIST:-}"
 CHROM_ARG=""
-REGION_START=1
-REGION_END=""
+REGION_START="${QUILT2_REGION_START:-1}"
+REGION_END="${QUILT2_REGION_END:-}"
 BUFFER="${DEFAULT_BUFFER}"
 NGEN="${DEFAULT_NGEN}"
-CHUNK_FILE=""
-AUTO_CHUNK_MAP="false"
-QUILT2_HOME=""
+CHUNK_FILE="${QUILT2_CHUNK_FILE:-}"
+AUTO_CHUNK_MAP="${QUILT2_AUTO_CHUNK_MAP:-false}"
+QUILT2_HOME="${QUILT2_HOME:-}"
 QUILT2_PREP_SCRIPT="${QUILT2_PREP_SCRIPT:-}"
 QUILT2_RUN_SCRIPT="${QUILT2_RUN_SCRIPT:-}"
 TRUTH_VCF=""
 EVAL_OUTPUT_DIR=""
-REMOVE_MISSING="false"
-MIN_PHASED_RATE="0.95"
-PREP_ONLY="false"
-IMPUTE_ONLY="false"
-DRY_RUN="false"
-STANDARDISE_NAME="false"
-STANDARDISE_NAME_FORCE="false"
+REMOVE_MISSING="${QUILT2_REMOVE_MISSING:-false}"
+MIN_PHASED_RATE="${QUILT2_MIN_PHASED_RATE:-0.95}"
+PREP_ONLY="${QUILT2_PREP_ONLY:-false}"
+IMPUTE_ONLY="${QUILT2_IMPUTE_ONLY:-false}"
+DRY_RUN="${QUILT2_DRY_RUN:-false}"
+STANDARDISE_NAME="${QUILT2_STANDARDISE_NAME:-false}"
+STANDARDISE_NAME_FORCE="${QUILT2_STANDARDISE_NAME_FORCE:-false}"
 BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}"
 QUILT2_CONDA_ENV="${QUILT2_CONDA_ENV:-quilt2}"
 
@@ -246,12 +263,13 @@ wait_for_slurm_job() {
 
 # SLURM config (shared by both phases)
 config="$(get_quilt2_config)"
-CFG_ACCOUNT="" CFG_PARTITION="" CFG_QOS="" CFG_NODES="" CFG_NTASKS="" CFG_CPUS="" CFG_MEMORY="" CFG_TIME="" CFG_ARRAY_MAX=""
+CFG_ACCOUNT="" CFG_PARTITION="" CFG_QOS="" CFG_CONSTRAINT="" CFG_NODES="" CFG_NTASKS="" CFG_CPUS="" CFG_MEMORY="" CFG_TIME="" CFG_ARRAY_MAX=""
 while IFS='=' read -r k v; do
     case "${k}" in
         ACCOUNT) CFG_ACCOUNT="${v}" ;;
         PARTITION) CFG_PARTITION="${v}" ;;
         QOS) CFG_QOS="${v}" ;;
+        CONSTRAINT) CFG_CONSTRAINT="${v}" ;;
         NODES) CFG_NODES="${v}" ;;
         NTASKS) CFG_NTASKS="${v}" ;;
         CPUS) CFG_CPUS="${v}" ;;
@@ -306,6 +324,7 @@ EOF
     [[ -n "${CFG_ACCOUNT}" ]]   && echo "#SBATCH --account=${CFG_ACCOUNT}"
     [[ -n "${CFG_PARTITION}" ]] && echo "#SBATCH --partition=${CFG_PARTITION}"
     [[ -n "${CFG_QOS}" ]]       && echo "#SBATCH --qos=${CFG_QOS}"
+    [[ -n "${CFG_CONSTRAINT}" ]]&& echo "#SBATCH --constraint=${CFG_CONSTRAINT}"
     cat <<EOF
 #SBATCH --nodes=${CFG_NODES}
 #SBATCH --ntasks=${CFG_NTASKS}
@@ -539,6 +558,7 @@ EOF
 [[ -n "${CFG_ACCOUNT}" ]]   && echo "#SBATCH --account=${CFG_ACCOUNT}"
 [[ -n "${CFG_PARTITION}" ]] && echo "#SBATCH --partition=${CFG_PARTITION}"
 [[ -n "${CFG_QOS}" ]]       && echo "#SBATCH --qos=${CFG_QOS}"
+[[ -n "${CFG_CONSTRAINT}" ]]&& echo "#SBATCH --constraint=${CFG_CONSTRAINT}"
 cat <<EOF
 #SBATCH --nodes=${CFG_NODES}
 #SBATCH --ntasks=${CFG_NTASKS}
