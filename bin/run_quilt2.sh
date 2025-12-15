@@ -43,6 +43,7 @@ Core options:
   --n-gen N                    nGen passed to QUILT2 (default 100)
   --bamlist PATH               BAM list (defaults to <work_dir>/bamlist.txt or bamlist.1.0.txt)
   --reference-panel-dir PATH   Panel VCF dir (defaults to 8.Imputated_VCF_BEAGLE then 7.Consolidated_VCF then work_dir)
+  --reference-fasta PATH       Reference FASTA (with .fai); used to fix VCF headers with missing contigs
   --quilt2-home PATH           Directory containing QUILT2.R and QUILT2_prepare_reference.R
   --quilt2-prepare-script PATH Override QUILT2_prepare_reference.R
   --quilt2-run-script PATH     Override QUILT2.R
@@ -291,6 +292,21 @@ if [[ "${REMOVE_MISSING}" == "true" || "${STANDARDISE_NAME}" == "true" ]]; then
 fi
 
 if [[ "${RUN_PHASE1}" == "true" ]]; then
+    # Warn if standardise-name is requested but reference FASTA index is unavailable (may fail on VCFs with undefined contigs)
+    if [[ "${STANDARDISE_NAME}" == "true" ]]; then
+        # Auto-detect .fai location
+        _fai_check="${REFERENCE_FASTA_INDEX:-${REFERENCE_FASTA:+${REFERENCE_FASTA}.fai}}"
+        if [[ -z "${_fai_check}" ]]; then
+            log_warn "No --reference-fasta provided; VCFs with undefined contig headers may fail during standardisation."
+            log_warn "Set QUILT2_REFERENCE_FASTA in config/environment.sh or use --reference-fasta <path>"
+        elif [[ ! -f "${_fai_check}" ]]; then
+            log_warn "Reference FASTA index not found: ${_fai_check}"
+            log_warn "VCFs with undefined contig headers may fail during standardisation. Run: samtools faidx <reference.fasta>"
+        else
+            log_info "Reference FASTA index found: ${_fai_check}"
+        fi
+        unset _fai_check
+    fi
     log_info "Phase 1: submitting panel prep array over ${#CHR_LIST[@]} chromosomes (standardise=${STANDARDISE_NAME}, remove_missing=${REMOVE_MISSING})"
     rm -f "${NOMISS_FAIL_FLAG}"
 
@@ -343,6 +359,10 @@ export REMOVE_MISSING="${REMOVE_MISSING}"
 export STANDARDISE_NAME="${STANDARDISE_NAME}"
 export STANDARDISE_NAME_FORCE="${STANDARDISE_NAME_FORCE}"
 export STANDARDISE_SUFFIX="_chr"
+# Auto-detect .fai: derive from REFERENCE_FASTA if not explicitly set
+REFERENCE_FASTA_INDEX="${REFERENCE_FASTA_INDEX:-${REFERENCE_FASTA:+${REFERENCE_FASTA}.fai}}"
+export REFERENCE_FASTA="${REFERENCE_FASTA}"
+export REFERENCE_FASTA_INDEX="${REFERENCE_FASTA_INDEX}"
 
 bash "${NOMISS_TEMPLATE}" \
   "${WORK_DIR}" \

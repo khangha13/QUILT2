@@ -340,6 +340,41 @@ done
 
 ---
 
+## 15. `--standardise-name` fails: "Contig 'X' is not defined in the header"
+
+### Symptom
+When running with `--standardise-name`, Phase 1 fails with:
+```
+[W::vcf_parse] Contig '1' is not defined in the header. (Quick workaround: index the file with tabix.)
+Encountered an error, cannot proceed. Please check the error output above.
+[E::bcf_hdr_read] Input is not detected as bcf or vcf format
+Could not read VCF/BCF headers from -
+[ERROR] Failed to standardise+sort Chr01
+```
+
+### Cause
+The input VCF has variant records with contig names (e.g., `1`) that are not defined in the VCF header (`##contig=<ID=1,...>`). `bcftools annotate --rename-chrs` fails when it encounters undefined contigs, producing invalid output that breaks the downstream `bcftools sort`.
+
+### Fix
+The pipeline now automatically fixes VCF headers using `bcftools reheader -f <ref.fai>` before the rename step, provided a reference FASTA is available.
+
+**To enable:**
+1. Set `QUILT2_REFERENCE_FASTA` in `config/environment.sh`:
+   ```bash
+   QUILT2_REFERENCE_FASTA="/path/to/reference.fasta"
+   ```
+2. Or pass `--reference-fasta /path/to/reference.fasta` on the command line.
+
+The `.fai` index is auto-detected from `<REFERENCE_FASTA>.fai`. If missing, run `samtools faidx reference.fasta` to create it.
+
+### Notes
+- **Auto-detection:** The `.fai` index is automatically derived from `REFERENCE_FASTA` (appends `.fai`). You can also set `REFERENCE_FASTA_INDEX` explicitly if the index is in a different location.
+- **Smart skip:** If the VCF already has `Chr*`-prefixed contigs (e.g., `Chr01`), the reheader step is skipped to avoid unnecessary processing.
+- If no reference FASTA is provided, the pipeline warns but proceeds; VCFs with malformed headers will still fail.
+- The header fix is applied transparently before `bcftools annotate`; a temporary fixed VCF is created and cleaned up automatically.
+
+---
+
 ## Summary Checklist
 
 Before running QUILT2 pipeline, verify:
@@ -349,3 +384,4 @@ Before running QUILT2 pipeline, verify:
 3. ✅ **Reference panel is phased** (genotypes use `|` not `/`)
 4. ✅ **VCF files are indexed** (`.csi` or `.tbi` index files exist)
 5. ✅ **Delete cached files** when changing configuration
+6. ✅ **Reference FASTA with .fai** available when using `--standardise-name` on VCFs with undefined contig headers

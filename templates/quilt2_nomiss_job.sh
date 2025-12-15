@@ -28,6 +28,8 @@ FAIL_FLAG="${8:-${NOMISS_FAIL_FLAG:-}}"
 STANDARDISE_NAME="${STANDARDISE_NAME:-false}"
 STANDARDISE_NAME_FORCE="${STANDARDISE_NAME_FORCE:-false}"
 STANDARDISE_SUFFIX="${STANDARDISE_SUFFIX:-_chr}"
+REFERENCE_FASTA="${REFERENCE_FASTA:-}"
+REFERENCE_FASTA_INDEX="${REFERENCE_FASTA_INDEX:-${REFERENCE_FASTA}.fai}"
 
 # Propagate DRY_RUN if set by orchestrator
 DRY_RUN="${DRY_RUN:-false}"
@@ -75,6 +77,62 @@ export BCFTOOLS_MODULE QUILT2_CONDA_ENV
 load_quilt_env || exit 1
 ensure_bcftools || exit 1
 
+# Check if VCF contigs are already in ChrNN format (no reheader needed)
+vcf_has_chr_contigs() {
+    local src="$1"
+    # Get first data contig from VCF
+    local first_contig
+    first_contig="$(bcftools view -H "${src}" 2>/dev/null | head -1 | cut -f1)"
+    if [[ -z "${first_contig}" ]]; then
+        # Empty VCF or can't read; check header contigs instead
+        first_contig="$(bcftools view -h "${src}" 2>/dev/null | grep '^##contig=<ID=' | head -1 | sed 's/.*ID=\([^,>]*\).*/\1/')"
+    fi
+    # Return true if contig starts with "Chr" (case-insensitive)
+    [[ "${first_contig,,}" == chr* ]]
+}
+
+# Fix VCF header by adding contig definitions from reference .fai (handles undefined contig warnings)
+fix_vcf_header() {
+    local src="$1"
+    # Auto-detect .fai: use explicit REFERENCE_FASTA_INDEX, or derive from REFERENCE_FASTA
+    local fai="${REFERENCE_FASTA_INDEX:-}"
+    if [[ -z "${fai}" && -n "${REFERENCE_FASTA:-}" ]]; then
+        fai="${REFERENCE_FASTA}.fai"
+    fi
+    
+    # If no .fai available, return source unchanged
+    if [[ -z "${fai}" || ! -f "${fai}" ]]; then
+        log_warn "Reference FASTA index not found (tried: ${fai:-<none>}); skipping header fix for ${src}"
+        echo "${src}"
+        return 0
+    fi
+    
+    # Check if contigs are already in Chr* format — no reheader needed
+    if vcf_has_chr_contigs "${src}"; then
+        log_info "VCF already has Chr-prefixed contigs; skipping reheader"
+        echo "${src}"
+        return 0
+    fi
+    
+    local tmp_fixed
+    tmp_fixed="$(mktemp --suffix=.vcf.gz)"
+    
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        echo "+ bcftools reheader -f \"${fai}\" \"${src}\" -o \"${tmp_fixed}\""
+        echo "${src}"
+        return 0
+    fi
+    
+    log_info "Fixing VCF header with reference index: ${fai}"
+    if bcftools reheader -f "${fai}" "${src}" -o "${tmp_fixed}" 2>/dev/null; then
+        echo "${tmp_fixed}"
+    else
+        log_warn "bcftools reheader failed; proceeding with original VCF (may fail if contigs undefined)"
+        rm -f "${tmp_fixed}"
+        echo "${src}"
+    fi
+}
+
 standardize_panel_vcf() {
     local chr="$1"
     local src_dir="$2"
@@ -103,10 +161,18 @@ standardize_panel_vcf() {
         fi
     fi
 
+    # Fix VCF header first (adds missing contig definitions from reference .fai)
+    local fixed_src
+    fixed_src="$(fix_vcf_header "${src}")"
+    local cleanup_fixed="false"
+    if [[ "${fixed_src}" != "${src}" && -f "${fixed_src}" ]]; then
+        cleanup_fixed="true"
+    fi
+
     # Build a simple rename map 1..17 -> Chr01..Chr17 (matches apple panel); already-Chr contigs remain unchanged.
     local rename_map
     rename_map="$(mktemp)"
-    trap 'rm -f "${rename_map}"' RETURN
+    trap 'rm -f "${rename_map}"; [[ "${cleanup_fixed}" == "true" ]] && rm -f "${fixed_src}"' RETURN
     : > "${rename_map}"
     for i in $(seq 1 17); do
         printf "%d\tChr%02d\n" "${i}" "${i}" >> "${rename_map}"
@@ -114,7 +180,7 @@ standardize_panel_vcf() {
 
     if [[ "${DRY_RUN}" == "true" ]]; then
         cat <<EOF
-+ bcftools annotate --rename-chrs "${rename_map}" "${src}" | bcftools sort -Oz -o "${dest}"
++ bcftools annotate --rename-chrs "${rename_map}" "${fixed_src}" | bcftools sort -Oz -o "${dest}"
 + bcftools index -f -c "${dest}"
 EOF
         echo "${dest}"
@@ -124,7 +190,7 @@ EOF
     log_info "Standardising ${chr}: ${src} -> ${dest}"
     tmp_sorted="${dest}.sorted.tmp.vcf.gz"
     rm -f "${tmp_sorted}" "${dest}"
-    if ! bcftools annotate --rename-chrs "${rename_map}" "${src}" | bcftools sort -Oz -o "${tmp_sorted}"; then
+    if ! bcftools annotate --rename-chrs "${rename_map}" "${fixed_src}" | bcftools sort -Oz -o "${tmp_sorted}"; then
         log_error "Failed to standardise+sort ${chr}"
         return 1
     fi
