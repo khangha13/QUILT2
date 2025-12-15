@@ -331,6 +331,9 @@ if [[ "${RUN_PHASE1}" == "true" ]]; then
         exit 1
     fi
 
+    # Auto-detect .fai: derive from REFERENCE_FASTA if not explicitly set (before heredoc expansion)
+    REFERENCE_FASTA_INDEX="${REFERENCE_FASTA_INDEX:-${REFERENCE_FASTA:+${REFERENCE_FASTA}.fai}}"
+
     NOMISS_SCRIPT="${SLURM_DIR}/quilt2_nomiss_$(date +%Y%m%d_%H%M%S).sh"
     {
     cat <<EOF
@@ -359,10 +362,8 @@ export REMOVE_MISSING="${REMOVE_MISSING}"
 export STANDARDISE_NAME="${STANDARDISE_NAME}"
 export STANDARDISE_NAME_FORCE="${STANDARDISE_NAME_FORCE}"
 export STANDARDISE_SUFFIX="_chr"
-# Auto-detect .fai: derive from REFERENCE_FASTA if not explicitly set
-REFERENCE_FASTA_INDEX="${REFERENCE_FASTA_INDEX:-${REFERENCE_FASTA:+${REFERENCE_FASTA}.fai}}"
-export REFERENCE_FASTA="${REFERENCE_FASTA}"
-export REFERENCE_FASTA_INDEX="${REFERENCE_FASTA_INDEX}"
+export REFERENCE_FASTA="${REFERENCE_FASTA:-}"
+export REFERENCE_FASTA_INDEX="${REFERENCE_FASTA_INDEX:-}"
 
 bash "${NOMISS_TEMPLATE}" \
   "${WORK_DIR}" \
