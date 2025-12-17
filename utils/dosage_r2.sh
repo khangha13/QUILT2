@@ -1,8 +1,8 @@
 #!/bin/bash
-# Compute concordance and dosage r2 between an imputed VCF and a truth VCF.
-# - Uses bcftools to intersect sites/samples, extract DS (or GP fallback) and GT.
-# - Calls an R helper to compute per-variant metrics and plots.
-# - Mirrors the Step1D environment setup (module purge, miniforge, bcftools, Rscript).
+# Compute concordance and dosage r2 between an imputed VCF (now array-coded)
+# and a truth VCF. Both VCFs are recoded with utils/wgs_to_array_vcf.py so
+# genotypes are on the same AT/CG scale, then dosages are derived from GT.
+# DS/GP tags are no longer used.
 
 set -euo pipefail
 
@@ -23,15 +23,13 @@ usage() {
 Usage: dosage_r2.sh --imputed <imputed.vcf.gz> --truth <truth.vcf.gz> --out-prefix <path> [options]
 
 Required:
-  --imputed PATH        Imputed VCF/BCF (with DS and/or GP)
+  --imputed PATH        Imputed VCF/BCF (array-coded or will be recoded)
   --truth PATH          Truth VCF/BCF (GT used as reference)
   --out-prefix PREFIX   Output prefix for metrics/plots (e.g., results/dosage_eval)
 
 Options:
   --samples FILE        File with sample IDs to evaluate (one per line). Defaults to intersection of VCF samples.
   --region STR          Region string (e.g., chr1:1-1e6) to limit evaluation.
-  --dosage-tag TAG      FORMAT tag to use for dosage (default: DS).
-  --gp-tag TAG          FORMAT tag to use for genotype probabilities (default: GP) for fallback dosage derivation.
   --no-biallelic-only   Do not restrict to biallelic SNPs (default is to restrict).
   --no-plots            Skip plotting; only metrics TSVs are produced.
   --keep-temp           Do not delete the temporary working directory.
@@ -52,8 +50,6 @@ TRUTH_VCF=""
 OUT_PREFIX=""
 SAMPLE_FILE=""
 REGION=""
-DOSAGE_TAG="DS"
-GP_TAG="GP"
 BIALLELIC_ONLY=true
 RUN_PLOTS=true
 KEEP_TEMP=false
@@ -70,10 +66,6 @@ while [[ $# -gt 0 ]]; do
             SAMPLE_FILE="$2"; shift 2 ;;
         --region)
             REGION="$2"; shift 2 ;;
-        --dosage-tag)
-            DOSAGE_TAG="$2"; shift 2 ;;
-        --gp-tag)
-            GP_TAG="$2"; shift 2 ;;
         --no-biallelic-only)
             BIALLELIC_ONLY=false; shift ;;
         --no-plots)
@@ -135,6 +127,29 @@ maybe_index() {
 maybe_index "${IMPUTED_VCF}"
 maybe_index "${TRUTH_VCF}"
 
+# Recode both VCFs to array-style genotypes to align with imputed output.
+PYTHON_BIN="${PYTHON_BIN:-python}"
+ARRAY_SCRIPT="${ROOT_DIR}/utils/wgs_to_array_vcf.py"
+if [[ ! -f "${ARRAY_SCRIPT}" ]]; then
+    log_error "Recoder not found: ${ARRAY_SCRIPT}"
+    exit 1
+fi
+if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+    log_error "Python not found (set PYTHON_BIN if needed)"
+    exit 1
+fi
+
+IMPUTED_ARRAY="${TMP_DIR}/imputed.array.vcf.gz"
+TRUTH_ARRAY="${TMP_DIR}/truth.array.vcf.gz"
+
+log_info "Recoding imputed VCF to array scale"
+run_cmd "${PYTHON_BIN}" "${ARRAY_SCRIPT}" -i "${IMPUTED_VCF}" -o "${IMPUTED_ARRAY}"
+log_info "Recoding truth VCF to array scale"
+run_cmd "${PYTHON_BIN}" "${ARRAY_SCRIPT}" -i "${TRUTH_VCF}" -o "${TRUTH_ARRAY}"
+
+run_cmd bcftools index -f -c "${IMPUTED_ARRAY}"
+run_cmd bcftools index -f -c "${TRUTH_ARRAY}"
+
 # Derive sample set
 SAMPLE_SET="${SAMPLE_FILE}"
 if [[ -n "${SAMPLE_FILE}" ]]; then
@@ -181,8 +196,8 @@ log_info "Extracting harmonized VCFs"
 IMPUTED_COMMON="${TMP_DIR}/imputed.common.vcf.gz"
 TRUTH_COMMON="${TMP_DIR}/truth.common.vcf.gz"
 
-run_cmd bcftools view -R "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" -Oz -o "${IMPUTED_COMMON}" "${IMPUTED_VCF}"
-run_cmd bcftools view -R "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" -Oz -o "${TRUTH_COMMON}" "${TRUTH_VCF}"
+run_cmd bcftools view -R "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" -Oz -o "${IMPUTED_COMMON}" "${IMPUTED_ARRAY}"
+run_cmd bcftools view -R "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" -Oz -o "${TRUTH_COMMON}" "${TRUTH_ARRAY}"
 run_cmd bcftools index -f -c "${IMPUTED_COMMON}"
 run_cmd bcftools index -f -c "${TRUTH_COMMON}"
 
@@ -193,33 +208,21 @@ for s in "${SAMPLE_ORDER[@]}"; do
     HEADER="${HEADER}\t${s}"
 done
 
-IMPUTED_DS_TSV="${TMP_DIR}/imputed_ds.tsv"
+IMPUTED_GT_TSV="${TMP_DIR}/imputed_gt.tsv"
 TRUTH_GT_TSV="${TMP_DIR}/truth_gt.tsv"
-IMPUTED_GP_TSV=""
 
-log_info "Extracting imputed dosage tag (${DOSAGE_TAG})"
-echo -e "${HEADER}" > "${IMPUTED_DS_TSV}"
-if ! bcftools query -f "%CHROM\t%POS\t%REF\t%ALT\t%ID[\t%${DOSAGE_TAG}]\n" -S "${SAMPLE_SET}" "${IMPUTED_COMMON}" >> "${IMPUTED_DS_TSV}"; then
-    log_error "Failed to extract ${DOSAGE_TAG} from imputed VCF"
+log_info "Extracting imputed genotypes (array-coded GT)"
+echo -e "${HEADER}" > "${IMPUTED_GT_TSV}"
+if ! bcftools query -f "%CHROM\t%POS\t%REF\t%ALT\t%ID[\t%GT]\n" -S "${SAMPLE_SET}" "${IMPUTED_COMMON}" >> "${IMPUTED_GT_TSV}"; then
+    log_error "Failed to extract GT from imputed VCF"
     exit 1
 fi
 
-log_info "Extracting truth genotypes (GT)"
+log_info "Extracting truth genotypes (array-coded GT)"
 echo -e "${HEADER}" > "${TRUTH_GT_TSV}"
 if ! bcftools query -f "%CHROM\t%POS\t%REF\t%ALT\t%ID[\t%GT]\n" -S "${SAMPLE_SET}" "${TRUTH_COMMON}" >> "${TRUTH_GT_TSV}"; then
     log_error "Failed to extract GT from truth VCF"
     exit 1
-fi
-
-log_info "Attempting GP fallback using tag ${GP_TAG}"
-GP_ATTEMPT="${TMP_DIR}/imputed_gp.tsv"
-echo -e "${HEADER}" > "${GP_ATTEMPT}"
-if bcftools query -f "%CHROM\t%POS\t%REF\t%ALT\t%ID[\t%${GP_TAG}]\n" -S "${SAMPLE_SET}" "${IMPUTED_COMMON}" >> "${GP_ATTEMPT}"; then
-    IMPUTED_GP_TSV="${GP_ATTEMPT}"
-    log_info "GP table captured for fallback dosage derivation"
-else
-    log_warn "GP tag ${GP_TAG} not available; proceeding without GP fallback"
-    IMPUTED_GP_TSV=""
 fi
 
 R_HELPER="${SCRIPT_DIR}/dosage_r2.R"
@@ -230,15 +233,11 @@ fi
 
 R_ARGS=(
     "${R_HELPER}"
-    "--imputed-ds" "${IMPUTED_DS_TSV}"
+    "--imputed-gt" "${IMPUTED_GT_TSV}"
     "--truth-gt" "${TRUTH_GT_TSV}"
     "--samples" "${SAMPLE_SET}"
     "--out-prefix" "${OUT_PREFIX}"
 )
-
-if [[ -n "${IMPUTED_GP_TSV}" ]]; then
-    R_ARGS+=( "--imputed-gp" "${IMPUTED_GP_TSV}" )
-fi
 
 if [[ "${RUN_PLOTS}" == "true" ]]; then
     R_ARGS+=( "--plots" )
@@ -247,4 +246,4 @@ fi
 log_info "Running R metrics helper"
 run_cmd Rscript "${R_ARGS[@]}"
 
-log_success "Dosage r2 and concordance metrics written to ${OUT_PREFIX}.*"
+log_info "Dosage r2 and concordance metrics written to ${OUT_PREFIX}.*"

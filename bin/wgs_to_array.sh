@@ -22,7 +22,7 @@ Usage:
   sbatch bin/wgs_to_array.sh /path/input.vcf.gz [output.vcf.gz]
 
 Notes:
-  - Activates the QUILT2 conda env if configured (QUILT2_CONDA_ENV).
+  - Activates the 'rplot' conda env (override with CONDA_ENV).
   - Output defaults to <input_basename>_array.vcf.gz in the same directory if not provided.
   - Adds a tabix index if bcftools is available.
 EOF
@@ -72,15 +72,48 @@ else
     log_warn() { echo "[WARN] $*" >&2; }
     log_error() { echo "[ERROR] $*" >&2; }
     run_cmd() { "$@"; }
-    load_quilt_env() { return 0; }
     ensure_bcftools() { command -v bcftools >/dev/null 2>&1; }
 fi
 
 log_info "Input VCF : ${INPUT}"
 log_info "Output VCF: ${OUTPUT}"
 
-# Try to activate conda env (from lib/functions.sh).
-if ! load_quilt_env; then
+# Activate 'rplot' conda environment (similar to step1d)
+CONDA_ENV="${CONDA_ENV:-rplot}"
+
+if command -v module >/dev/null 2>&1; then
+    if module load miniforge/25.3.0-3 >/dev/null 2>&1; then
+        log_info "Loaded miniforge/25.3.0-3 module"
+    else
+        log_warn "Failed to load miniforge/25.3.0-3 module"
+    fi
+fi
+
+conda_activated=false
+if [[ -n "${ROOTMINIFORGE:-}" && -f "${ROOTMINIFORGE}/etc/profile.d/conda.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${ROOTMINIFORGE}/etc/profile.d/conda.sh"
+    if conda activate "${CONDA_ENV}" >/dev/null 2>&1; then
+        log_info "Conda environment '${CONDA_ENV}' activated"
+        conda_activated=true
+    else
+        log_warn "Failed to activate conda environment: ${CONDA_ENV}"
+    fi
+elif command -v conda >/dev/null 2>&1; then
+    conda_base="$(conda info --base 2>/dev/null || true)"
+    if [[ -n "${conda_base}" && -f "${conda_base}/etc/profile.d/conda.sh" ]]; then
+        # shellcheck source=/dev/null
+        source "${conda_base}/etc/profile.d/conda.sh"
+        if conda activate "${CONDA_ENV}" >/dev/null 2>&1; then
+            log_info "Conda environment '${CONDA_ENV}' activated"
+            conda_activated=true
+        else
+            log_warn "Failed to activate conda environment: ${CONDA_ENV}"
+        fi
+    fi
+fi
+
+if [[ "${conda_activated}" != "true" ]]; then
     log_warn "Proceeding without activating conda env; ensure pysam is available."
 fi
 

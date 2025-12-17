@@ -11,6 +11,7 @@ args <- commandArgs(trailingOnly = TRUE)
 parse_args <- function(args) {
   opts <- list(
     imputed_ds = NULL,
+    imputed_gt = NULL,
     truth_gt = NULL,
     imputed_gp = NULL,
     samples = NULL,
@@ -20,11 +21,12 @@ parse_args <- function(args) {
   i <- 1
   while (i <= length(args)) {
     key <- args[[i]]
-    if (key %in% c("--imputed-ds", "--truth-gt", "--imputed-gp", "--samples", "--out-prefix")) {
+    if (key %in% c("--imputed-ds", "--imputed-gt", "--truth-gt", "--imputed-gp", "--samples", "--out-prefix")) {
       if (i == length(args)) stop(key, " requires a value")
       val <- args[[i + 1]]
       switch(key,
              "--imputed-ds" = opts$imputed_ds <- val,
+             "--imputed-gt" = opts$imputed_gt <- val,
              "--truth-gt" = opts$truth_gt <- val,
              "--imputed-gp" = opts$imputed_gp <- val,
              "--samples" = opts$samples <- val,
@@ -34,13 +36,16 @@ parse_args <- function(args) {
       opts$plots <- TRUE
       i <- i + 1
     } else if (key %in% c("--help", "-h")) {
-      cat("Usage: dosage_r2.R --imputed-ds <tsv> --truth-gt <tsv> --samples <file> --out-prefix <prefix> [--imputed-gp <tsv>] [--plots]\n")
+      cat("Usage: dosage_r2.R --imputed-gt <tsv> --truth-gt <tsv> --samples <file> --out-prefix <prefix> [--imputed-ds <tsv>] [--imputed-gp <tsv>] [--plots]\n")
       quit(status = 0)
     } else {
       stop("Unknown argument: ", key)
     }
   }
-  required <- c("imputed_ds", "truth_gt", "samples", "out_prefix")
+  if (is.null(opts$imputed_gt) && is.null(opts$imputed_ds)) {
+    stop("Provide --imputed-gt (preferred) or --imputed-ds")
+  }
+  required <- c("truth_gt", "samples", "out_prefix")
   missing <- required[sapply(required, function(k) is.null(opts[[k]]))]
   if (length(missing) > 0) stop("Missing required args: ", paste(missing, collapse = ", "))
   opts
@@ -110,46 +115,60 @@ calc_variant_metrics <- function(ds_row, truth_row) {
   list(r2 = r2, concordance = conc, maf = maf, n = n_nonmiss)
 }
 
-imputed_ds <- load_ds_table(opts$imputed_ds)
 truth_gt <- load_gt_table(opts$truth_gt)
-
-if (!identical(imputed_ds$meta, truth_gt$meta)) {
-  stop("Imputed and truth tables have different variant ordering or metadata")
-}
-if (!identical(imputed_ds$samples, truth_gt$samples)) {
-  stop("Imputed and truth tables have different sample ordering")
-}
-if (!identical(imputed_ds$samples, sample_ids)) {
+if (!identical(truth_gt$samples, sample_ids)) {
   stop("Extracted sample order does not match provided sample list")
 }
 
-ds_mat <- imputed_ds$mat
-if (all(is.na(ds_mat)) && !is.null(opts$imputed_gp)) {
-  gp_tbl <- load_ds_table(opts$imputed_gp)
-  if (!identical(gp_tbl$meta, imputed_ds$meta) || !identical(gp_tbl$samples, imputed_ds$samples)) {
-    stop("GP table does not match DS table in ordering")
-  }
-  ds_from_gp <- gp_to_ds(gp_tbl$mat)
-  ds_mat <- ds_from_gp
-} else if (!is.null(opts$imputed_gp)) {
-  gp_tbl <- load_ds_table(opts$imputed_gp)
-  if (identical(gp_tbl$meta, imputed_ds$meta) && identical(gp_tbl$samples, imputed_ds$samples)) {
-    ds_from_gp <- gp_to_ds(gp_tbl$mat)
-    replace_idx <- is.na(ds_mat)
-    ds_mat[replace_idx] <- ds_from_gp[replace_idx]
-  }
-}
+variant_meta <- truth_gt$meta
+sample_order <- truth_gt$samples
 
-if (all(is.na(ds_mat))) {
-  stop("No usable dosage values were found (DS and GP missing/empty)")
+if (!is.null(opts$imputed_gt)) {
+  imputed_gt <- load_gt_table(opts$imputed_gt)
+  if (!identical(imputed_gt$meta, variant_meta)) {
+    stop("Imputed GT table differs from truth in variant ordering/metadata")
+  }
+  if (!identical(imputed_gt$samples, sample_order)) {
+    stop("Imputed GT table sample order differs from truth")
+  }
+  ds_mat <- gt_to_dosage(imputed_gt$mat)
+} else {
+  imputed_ds <- load_ds_table(opts$imputed_ds)
+  if (!identical(imputed_ds$meta, variant_meta)) {
+    stop("Imputed and truth tables have different variant ordering or metadata")
+  }
+  if (!identical(imputed_ds$samples, sample_order)) {
+    stop("Imputed and truth tables have different sample ordering")
+  }
+  ds_mat <- imputed_ds$mat
+
+  if (all(is.na(ds_mat)) && !is.null(opts$imputed_gp)) {
+    gp_tbl <- load_gt_table(opts$imputed_gp)
+    if (!identical(gp_tbl$meta, imputed_ds$meta) || !identical(gp_tbl$samples, imputed_ds$samples)) {
+      stop("GP table does not match DS table in ordering")
+    }
+    ds_from_gp <- gp_to_ds(gp_tbl$mat)
+    ds_mat <- ds_from_gp
+  } else if (!is.null(opts$imputed_gp)) {
+    gp_tbl <- load_gt_table(opts$imputed_gp)
+    if (identical(gp_tbl$meta, imputed_ds$meta) && identical(gp_tbl$samples, imputed_ds$samples)) {
+      ds_from_gp <- gp_to_ds(gp_tbl$mat)
+      replace_idx <- is.na(ds_mat)
+      ds_mat[replace_idx] <- ds_from_gp[replace_idx]
+    }
+  }
+
+  if (all(is.na(ds_mat))) {
+    stop("No usable dosage values were found (DS and GP missing/empty)")
+  }
 }
 
 truth_dosage <- gt_to_dosage(truth_gt$mat)
 
-metrics_list <- vector("list", nrow(imputed_ds$meta))
-for (i in seq_len(nrow(imputed_ds$meta))) {
+metrics_list <- vector("list", nrow(variant_meta))
+for (i in seq_len(nrow(variant_meta))) {
   res <- calc_variant_metrics(ds_mat[i, ], truth_dosage[i, ])
-  metrics_list[[i]] <- cbind(imputed_ds$meta[i], data.table(
+  metrics_list[[i]] <- cbind(variant_meta[i], data.table(
     maf = res$maf,
     n_non_missing = res$n,
     r2 = res$r2,
