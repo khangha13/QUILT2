@@ -94,7 +94,7 @@ EVAL_OUTPUT_DIR=""
 QUILT2_CONDA_ENV="${QUILT2_CONDA_ENV:-quilt2}"
 MISSING_REPORT=""
 REMOVE_MISSING="false"
-MIN_PHASED_RATE="0.95"
+MIN_VALID_GT_RATE="0.95"
 PREP_ONLY="false"
 IMPUTE_ONLY="false"
 DRY_RUN="false"
@@ -138,8 +138,8 @@ while [[ $# -gt 0 ]]; do
             EVAL_OUTPUT_DIR="$2"; shift 2 ;;
         --remove-missing)
             REMOVE_MISSING="true"; shift ;;
-        --min-phased-rate)
-            MIN_PHASED_RATE="$2"; shift 2 ;;
+        --min-valid-gt-rate)
+            MIN_VALID_GT_RATE="$2"; shift 2 ;;
         --prepare-only)
             PREP_ONLY="true"; shift ;;
         --impute-only)
@@ -678,14 +678,13 @@ normalize_panel_vcf() {
 
     local cleaned_vcf="${PANEL_OUT_DIR}/quilt.nomiss.${chr}.vcf.gz"
 
-    # Filter expression: keep variants where ≥MIN_PHASED_RATE of samples have phased genotypes (contain "|")
-    # This removes variants with too many missing or unphased genotypes
-    local filter_expr='COUNT(GT~"[|]") >= '"${MIN_PHASED_RATE}"' * N_SAMPLES'
+    # Filter expression: keep variants with high phased rate AND no missing genotypes (./. or .|.)
+    local filter_expr='COUNT(GT~"[|]") >= '"${MIN_VALID_GT_RATE}"' * N_SAMPLES && COUNT(GT="mis") = 0'
 
     if [[ "${DRY_RUN}" == "true" ]]; then
         cat <<EOF
 + bcftools view -H "${invcf}" | wc -l    # total variants
-+ bcftools view -e '${filter_expr}' -H "${invcf}" | wc -l    # removed (below ${MIN_PHASED_RATE} phased rate)
++ bcftools view -e '${filter_expr}' -H "${invcf}" | wc -l    # removed (below ${MIN_VALID_GT_RATE} phased rate or has missing GT)
 + bcftools view -i '${filter_expr}' "${invcf}" -Oz -o "${cleaned_vcf}"
 + bcftools index -f -c "${cleaned_vcf}"
 EOF
@@ -698,16 +697,16 @@ EOF
         total=$(bcftools view -H "${invcf}" | wc -l | awk '{print $1}')
         removed=$(bcftools view -e "${filter_expr}" -H "${invcf}" | wc -l | awk '{print $1}')
         if ! bcftools view -i "${filter_expr}" "${invcf}" -Oz -o "${cleaned_vcf}"; then
-            log_error "bcftools filter (min phased rate ${MIN_PHASED_RATE}) failed for ${invcf}"
+            log_error "bcftools filter (min valid GT rate ${MIN_VALID_GT_RATE}, no missing GT) failed for ${invcf}"
             exit 1
         fi
         run_cmd bcftools index -f -c "${cleaned_vcf}"
         kept=$((total - removed))
         if [[ ! -f "${MISSING_REPORT}" ]]; then
-            echo -e "chromosome\tinput_vcf\ttotal\tremoved\tkept\tmin_phased_rate\toutput_vcf" > "${MISSING_REPORT}"
+            echo -e "chromosome\tinput_vcf\ttotal\tremoved\tkept\tmin_valid_gt_rate\toutput_vcf" > "${MISSING_REPORT}"
         fi
-        echo -e "${chr}\t${invcf}\t${total}\t${removed}\t${kept}\t${MIN_PHASED_RATE}\t${cleaned_vcf}" >> "${MISSING_REPORT}"
-        log_info "Filtered ${chr}: ${removed}/${total} variants removed (below ${MIN_PHASED_RATE} phased rate); ${kept} kept. Output: ${cleaned_vcf}"
+        echo -e "${chr}\t${invcf}\t${total}\t${removed}\t${kept}\t${MIN_VALID_GT_RATE}\t${cleaned_vcf}" >> "${MISSING_REPORT}"
+        log_info "Filtered ${chr}: ${removed}/${total} variants removed (below ${MIN_VALID_GT_RATE} valid GT rate or missing GT); ${kept} kept. Output: ${cleaned_vcf}"
     else
         log_info "Cleaned panel already exists for ${chr}: ${cleaned_vcf}"
     fi

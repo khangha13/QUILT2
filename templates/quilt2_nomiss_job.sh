@@ -13,14 +13,14 @@ fi
 source "${QUILT2_ROOT}/lib/functions.sh"
 
 if [ "$#" -lt 5 ]; then
-    log_error "Usage: quilt2_nomiss_job.sh <WORK_DIR> <REFERENCE_PANEL_DIR> <PANEL_OUT_DIR> <MIN_PHASED_RATE> <CHR_MANIFEST> [BCFTOOLS_MODULE] [QUILT2_CONDA_ENV] [FAIL_FLAG]"
+    log_error "Usage: quilt2_nomiss_job.sh <WORK_DIR> <REFERENCE_PANEL_DIR> <PANEL_OUT_DIR> <MIN_VALID_GT_RATE> <CHR_MANIFEST> [BCFTOOLS_MODULE] [QUILT2_CONDA_ENV] [FAIL_FLAG]"
     exit 1
 fi
 
 WORK_DIR="$1"
 REFERENCE_PANEL_DIR="$2"
 PANEL_OUT_DIR="$3"
-MIN_PHASED_RATE="$4"
+MIN_VALID_GT_RATE="$4"
 CHR_MANIFEST="$5"
 BCFTOOLS_MODULE="${6:-${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}}"
 QUILT2_CONDA_ENV="${7:-${QUILT2_CONDA_ENV:-quilt2}}"
@@ -36,7 +36,7 @@ DRY_RUN="${DRY_RUN:-false}"
 
 # Export flags consumed by helpers
 export REMOVE_MISSING="${REMOVE_MISSING:-false}"
-export MIN_PHASED_RATE
+export MIN_VALID_GT_RATE
 export PANEL_OUT_DIR
 export MISSING_REPORT="${MISSING_REPORT:-${PANEL_OUT_DIR%/}/missing_sites_removed.tsv}"
 export CHUNK_FILE="" # ensure normalize_panel_vcf contig warning is meaningful
@@ -196,7 +196,7 @@ EOF
     echo "${dest}"
 }
 
-log_info "Phase 1: panel prep for ${CHR} (standardise=${STANDARDISE_NAME}, remove_missing=${REMOVE_MISSING}, min phased rate ${MIN_PHASED_RATE})"
+log_info "Phase 1: panel prep for ${CHR} (standardise=${STANDARDISE_NAME}, remove_missing=${REMOVE_MISSING}, min valid GT rate ${MIN_VALID_GT_RATE})"
 panel_source_dir="${REFERENCE_PANEL_DIR}"
 if [[ "${STANDARDISE_NAME}" == "true" ]]; then
     std_vcf="$(standardize_panel_vcf "${CHR}" "${REFERENCE_PANEL_DIR}" "${PANEL_OUT_DIR}" "${STANDARDISE_SUFFIX}" "${STANDARDISE_NAME_FORCE}")" || exit 1

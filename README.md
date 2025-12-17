@@ -20,14 +20,14 @@ SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C 
 - Copy `config/environment.template.sh` to `config/environment.sh` and set site defaults (scratch/log roots, reference FASTA, genetic map path, panel dir).
 - SLURM defaults: `QUILT2_ACCOUNT`, `QUILT2_PARTITION`, `QUILT2_QOS`, `QUILT2_CPUS_PER_TASK`, `QUILT2_MEMORY`, `QUILT2_TIME_LIMIT`, `QUILT2_ARRAY_LIMIT` (0=no cap), `QUILT2_CONSTRAINT` (optional).
 - Tooling: `BCFTOOLS_MODULE`, `QUILT2_CONDA_ENV`, optional `QUILT2_HOME`/`QUILT2_PREP_SCRIPT`/`QUILT2_RUN_SCRIPT`.
-- Behavior toggles: `QUILT2_CHROMS`, `QUILT2_BUFFER`, `QUILT2_NGEN`, `QUILT2_AUTO_CHUNK_MAP`, `QUILT2_CHUNK_FILE`, `QUILT2_REGION_START/END`, `QUILT2_REMOVE_MISSING`, `QUILT2_MIN_PHASED_RATE`, `QUILT2_STANDARDISE_NAME`, `QUILT2_STANDARDISE_NAME_FORCE`, `QUILT2_PREP_ONLY`, `QUILT2_IMPUTE_ONLY`, `QUILT2_DRY_RUN`, `QUILT2_BAMLIST`.
+- Behavior toggles: `QUILT2_CHROMS`, `QUILT2_BUFFER`, `QUILT2_NGEN`, `QUILT2_AUTO_CHUNK_MAP`, `QUILT2_CHUNK_FILE`, `QUILT2_REGION_START/END`, `QUILT2_REMOVE_MISSING`, `QUILT2_MIN_VALID_GT_RATE`, `QUILT2_STANDARDISE_NAME`, `QUILT2_STANDARDISE_NAME_FORCE`, `QUILT2_PREP_ONLY`, `QUILT2_IMPUTE_ONLY`, `QUILT2_DRY_RUN`, `QUILT2_BAMLIST`.
 
 ## Inputs
 - `--input-dir` (`WORK_DIR`) containing:
   - Panel VCFs under `8.Imputated_VCF_BEAGLE/` (preferred) or `7.Consolidated_VCF/`; otherwise `WORK_DIR` is searched.
   - `bamlist.txt` (or `bamlist.1.0.txt` / `bamlist.tsv`) unless running `--prepare-only`; **still required for `--impute-only`**.
 - Genetic map: `--genetic-map` file or directory with per-chromosome maps. Names must match `--chr` values (`Chr01` vs `1`, etc.).
-- Reference panel should be **phased**; use `--remove-missing` with `--min-phased-rate` if needed.
+- Reference panel should be **phased**; use `--remove-missing` with `--min-valid-gt-rate` if needed.
 - Ensure VCFs are indexed (`.tbi/.csi`).
 
 ## Quick Start
@@ -37,7 +37,7 @@ bash bin/run_quilt2.sh \
   -i /path/to/work_dir \
   --genetic-map /path/to/genetic_maps_dir \
   --auto-chunk-map \
-  --remove-missing --min-phased-rate 0.95
+  --remove-missing --min-valid-gt-rate 0.95
 ```
 
 Fixed region for all chromosomes:
@@ -64,7 +64,7 @@ bash bin/run_quilt2.sh ... --dry-run
 
 Remove-missing toggle:
 ```bash
-  --remove-missing --min-phased-rate 0.9   # keep variants with >=90% phased
+  --remove-missing --min-valid-gt-rate 0.9   # keep variants with >=90% phased
 ```
 
 Point to QUILT2 scripts:

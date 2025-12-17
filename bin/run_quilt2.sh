@@ -90,7 +90,7 @@ QUILT2_RUN_SCRIPT="${QUILT2_RUN_SCRIPT:-}"
 TRUTH_VCF=""
 EVAL_OUTPUT_DIR=""
 REMOVE_MISSING="${QUILT2_REMOVE_MISSING:-false}"
-MIN_PHASED_RATE="${QUILT2_MIN_PHASED_RATE:-0.95}"
+MIN_VALID_GT_RATE="${QUILT2_MIN_VALID_GT_RATE:-0.95}"
 PREP_ONLY="${QUILT2_PREP_ONLY:-false}"
 IMPUTE_ONLY="${QUILT2_IMPUTE_ONLY:-false}"
 DRY_RUN="${QUILT2_DRY_RUN:-false}"
@@ -120,7 +120,7 @@ while [[ $# -gt 0 ]]; do
         --truth-vcf) TRUTH_VCF="$2"; shift 2 ;;
         --eval-output) EVAL_OUTPUT_DIR="$2"; shift 2 ;;
         --remove-missing) REMOVE_MISSING="true"; shift ;;
-        --min-phased-rate) MIN_PHASED_RATE="$2"; shift 2 ;;
+        --min-valid-gt-rate) MIN_VALID_GT_RATE="$2"; shift 2 ;;
         --prepare-only) PREP_ONLY="true"; shift ;;
         --impute-only) IMPUTE_ONLY="true"; shift ;;
         --dry-run) DRY_RUN="true"; shift ;;
@@ -369,7 +369,7 @@ bash "${NOMISS_TEMPLATE}" \
   "${WORK_DIR}" \
   "${REFERENCE_PANEL_DIR}" \
   "${PANEL_OUT_DIR}" \
-  "${MIN_PHASED_RATE}" \
+  "${MIN_VALID_GT_RATE}" \
   "${nomiss_manifest}" \
   "${BCFTOOLS_MODULE}" \
   "${QUILT2_CONDA_ENV}" \
@@ -604,7 +604,7 @@ bash "${TEMPLATE}" \
   "${BAMLIST}" \
   "${NGEN}" \
   "${REMOVE_MISSING}" \
-  "${MIN_PHASED_RATE}" \
+  "${MIN_VALID_GT_RATE}" \
   "${PREP_ONLY}" \
   "${IMPUTE_ONLY}" \
   "${OUTPUT_DIR}" \
