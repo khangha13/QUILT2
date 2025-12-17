@@ -16,7 +16,8 @@ QUILT2_TIME_LIMIT="${QUILT2_TIME_LIMIT:-72:00:00}"
 
 # Array limit (max tasks submitted even if manifest longer)
 QUILT2_ARRAY_MAX="${QUILT2_ARRAY_MAX:-${QUILT2_ARRAY_LIMIT:-0}}" # 0 = no cap
-QUILT2_CONSTRAINT="${QUILT2_CONSTRAINT:-}"
+# Default to epyc4 nodes to avoid bcftools ISA issues on older hardware
+QUILT2_CONSTRAINT="${QUILT2_CONSTRAINT:-epyc4}"
 
 get_quilt2_config() {
     cat <<EOF

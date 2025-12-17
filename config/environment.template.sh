@@ -46,14 +46,14 @@ QUILT2_CPUS_PER_TASK="${QUILT2_CPUS_PER_TASK:-5}"
 QUILT2_MEMORY="${QUILT2_MEMORY:-36G}"
 QUILT2_TIME_LIMIT="${QUILT2_TIME_LIMIT:-72:00:00}"
 QUILT2_ARRAY_LIMIT="${QUILT2_ARRAY_LIMIT:-0}"   # 0 = no cap
-QUILT2_CONSTRAINT="${QUILT2_CONSTRAINT:-}"      # optional node constraint
+QUILT2_CONSTRAINT="${QUILT2_CONSTRAINT:-epyc4}" # constrain to known-good nodes
 
 # -----------------------------------------------------------------------------
 # TOOLS / ENVIRONMENTS
 # -----------------------------------------------------------------------------
 
 # bcftools module name to load if bcftools not on PATH
-BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}"
+BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-GCC-12.3.0}"
 
 # Conda environment for QUILT2 scripts
 QUILT2_CONDA_ENV="${QUILT2_CONDA_ENV:-quilt2}"

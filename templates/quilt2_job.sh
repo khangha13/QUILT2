@@ -34,7 +34,7 @@ OUTPUT_DIR="${14}"
 PANEL_OUT_DIR="${15}"
 RDATA_DIR="${16}"
 TMP_DIR="${17}"
-BCFTOOLS_MODULE="${18:-${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}}"
+BCFTOOLS_MODULE="${18:-${BCFTOOLS_MODULE:-bcftools/1.18-GCC-12.3.0}}"
 QUILT2_CONDA_ENV="${19:-${QUILT2_CONDA_ENV:-quilt2}}"
 
 # Optional evaluation inputs (may be blank)

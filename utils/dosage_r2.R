@@ -16,12 +16,16 @@ parse_args <- function(args) {
     imputed_gp = NULL,
     samples = NULL,
     out_prefix = NULL,
-    plots = FALSE
+    plots = FALSE,
+    use_vcfpp = FALSE,
+    vcfpp_imputed = NULL,
+    vcfpp_truth = NULL,
+    write_parquet = TRUE
   )
   i <- 1
   while (i <= length(args)) {
     key <- args[[i]]
-    if (key %in% c("--imputed-ds", "--imputed-gt", "--truth-gt", "--imputed-gp", "--samples", "--out-prefix")) {
+    if (key %in% c("--imputed-ds", "--imputed-gt", "--truth-gt", "--imputed-gp", "--samples", "--out-prefix", "--vcfpp-imputed", "--vcfpp-truth", "--write-parquet")) {
       if (i == length(args)) stop(key, " requires a value")
       val <- args[[i + 1]]
       switch(key,
@@ -30,13 +34,19 @@ parse_args <- function(args) {
              "--truth-gt" = opts$truth_gt <- val,
              "--imputed-gp" = opts$imputed_gp <- val,
              "--samples" = opts$samples <- val,
-             "--out-prefix" = opts$out_prefix <- val)
+             "--out-prefix" = opts$out_prefix <- val,
+             "--vcfpp-imputed" = opts$vcfpp_imputed <- val,
+             "--vcfpp-truth" = opts$vcfpp_truth <- val,
+             "--write-parquet" = opts$write_parquet <- val)
       i <- i + 2
     } else if (key == "--plots") {
       opts$plots <- TRUE
       i <- i + 1
+    } else if (key == "--use-vcfpp") {
+      opts$use_vcfpp <- TRUE
+      i <- i + 1
     } else if (key %in% c("--help", "-h")) {
-      cat("Usage: dosage_r2.R --imputed-gt <tsv> --truth-gt <tsv> --samples <file> --out-prefix <prefix> [--imputed-ds <tsv>] [--imputed-gp <tsv>] [--plots]\n")
+      cat("Usage: dosage_r2.R --imputed-gt <tsv> --truth-gt <tsv> --samples <file> --out-prefix <prefix> [--imputed-ds <tsv>] [--imputed-gp <tsv>] [--use-vcfpp --vcfpp-imputed <vcf> --vcfpp-truth <vcf>] [--write-parquet <true|false>] [--plots]\n")
       quit(status = 0)
     } else {
       stop("Unknown argument: ", key)
@@ -48,6 +58,12 @@ parse_args <- function(args) {
   required <- c("truth_gt", "samples", "out_prefix")
   missing <- required[sapply(required, function(k) is.null(opts[[k]]))]
   if (length(missing) > 0) stop("Missing required args: ", paste(missing, collapse = ", "))
+  if (isTRUE(opts$use_vcfpp) && (is.null(opts$vcfpp_imputed) || is.null(opts$vcfpp_truth))) {
+    stop("When --use-vcfpp is set, provide --vcfpp-imputed and --vcfpp-truth VCFs")
+  }
+  if (is.character(opts$write_parquet)) {
+    opts$write_parquet <- tolower(opts$write_parquet) %in% c("true", "1", "yes", "y")
+  }
   opts
 }
 
@@ -97,6 +113,14 @@ gt_to_dosage <- function(gt_mat) {
   dosage
 }
 
+open_png <- function(path, width = 1600, height = 1200, res = 200) {
+  if (requireNamespace("ragg", quietly = TRUE)) {
+    ragg::agg_png(filename = path, width = width, height = height, units = "px", res = res)
+  } else {
+    grDevices::png(filename = path, width = width / res, height = height / res, units = "in", res = res)
+  }
+}
+
 calc_variant_metrics <- function(ds_row, truth_row) {
   keep <- !(is.na(ds_row) | is.na(truth_row))
   n_nonmiss <- sum(keep)
@@ -113,6 +137,54 @@ calc_variant_metrics <- function(ds_row, truth_row) {
                  ifelse(ds_row[keep] <= 0.5, 0, 1))
   conc <- mean(ghat == round(truth_row[keep]))
   list(r2 = r2, concordance = conc, maf = maf, n = n_nonmiss)
+}
+
+write_concordance_parquet <- function(meta_dt, imputed_ds, truth_ds, sample_ids, out_prefix) {
+  if (!requireNamespace("arrow", quietly = TRUE)) {
+    warning("arrow package not installed; skipping concordance parquet")
+    return(invisible(NULL))
+  }
+  imp_gt <- round(imputed_ds)
+  truth_gt <- round(truth_ds)
+  conc_mat <- matrix(NA_real_, nrow = nrow(imp_gt), ncol = ncol(imp_gt))
+  keep <- !(is.na(imp_gt) | is.na(truth_gt))
+  conc_mat[keep] <- as.numeric(imp_gt[keep] == truth_gt[keep])
+  colnames(conc_mat) <- sample_ids
+  conc_dt <- cbind(as.data.table(meta_dt), as.data.table(conc_mat))
+  arrow::write_parquet(conc_dt, sprintf("%s.concordance.parquet", out_prefix))
+}
+
+run_vcfpp <- function(imputed_vcf, truth_vcf, out_prefix) {
+  if (!requireNamespace("vcfppR", quietly = TRUE)) {
+    warning("vcfppR not installed; skipping vcfpp evaluation")
+    return(invisible(NULL))
+  }
+  res <- tryCatch(
+    vcfppR::vcfcomp(test = imputed_vcf, truth = truth_vcf, stats = "r2", formats = c("GT")),
+    error = function(e) e
+  )
+  if (inherits(res, "error")) {
+    warning("vcfppR::vcfcomp failed: ", conditionMessage(res))
+    return(invisible(NULL))
+  }
+  saveRDS(res, sprintf("%s.vcfpp.rds", out_prefix))
+  dt <- NULL
+  if (is.data.frame(res)) {
+    dt <- as.data.table(res)
+  } else if (is.list(res) && !is.null(res$stats)) {
+    dt <- tryCatch(as.data.table(res$stats), error = function(e) NULL)
+  }
+  if (!is.null(dt)) {
+    fwrite(dt, sprintf("%s.vcfpp.r2.tsv", out_prefix), sep = "\t")
+  }
+  pngfile <- sprintf("%s.vcfpp.r2.png", out_prefix)
+  open_png(pngfile)
+  tryCatch({
+    vcfppR::vcfplot(res, col = 2, cex = 1.5, lwd = 2, type = "b")
+  }, error = function(e) {
+    warning("vcfppR::vcfplot failed: ", conditionMessage(e))
+  })
+  grDevices::dev.off()
 }
 
 truth_gt <- load_gt_table(opts$truth_gt)
@@ -201,12 +273,12 @@ fwrite(metrics_dt, sprintf("%s.metrics.tsv", out_prefix), sep = "\t")
 fwrite(summary_dt, sprintf("%s.summary.tsv", out_prefix), sep = "\t", col.names = TRUE)
 fwrite(maf_bins_dt, sprintf("%s.maf_bins.tsv", out_prefix), sep = "\t")
 
-open_png <- function(path, width = 1600, height = 1200, res = 200) {
-  if (requireNamespace("ragg", quietly = TRUE)) {
-    ragg::agg_png(filename = path, width = width, height = height, units = "px", res = res)
-  } else {
-    grDevices::png(filename = path, width = width / res, height = height / res, units = "in", res = res)
-  }
+if (isTRUE(opts$write_parquet)) {
+  write_concordance_parquet(variant_meta, ds_mat, truth_dosage, sample_order, out_prefix)
+}
+
+if (isTRUE(opts$use_vcfpp)) {
+  run_vcfpp(opts$vcfpp_imputed, opts$vcfpp_truth, out_prefix)
 }
 
 if (isTRUE(opts$plots)) {
