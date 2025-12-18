@@ -145,6 +145,11 @@ if command -v module >/dev/null 2>&1; then
     else
         log_warn "Failed to load miniforge/25.3.0-3 module"
     fi
+    if module load bcftools >/dev/null 2>&1; then
+        log_info "Loaded bcftools module"
+    else
+        log_warn "Failed to load bcftools module"
+    fi
 fi
 
 conda_activated=false

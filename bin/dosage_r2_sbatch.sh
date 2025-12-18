@@ -82,7 +82,7 @@ elif [[ -f "${ENV_TEMPLATE}" ]]; then
     source "${ENV_TEMPLATE}"
 fi
 
-if [[ ! -x "${DOSAGE_SCRIPT}" ]]; then
+if [[ ! -f "${DOSAGE_SCRIPT}" ]]; then
     echo "[ERROR] Missing helper: ${DOSAGE_SCRIPT}" >&2
     exit 1
 fi
