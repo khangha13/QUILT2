@@ -138,18 +138,13 @@ log_info "Temporary working directory: ${TMP_DIR}"
 
 # Activate 'rplot' conda environment (similar to step1d)
 CONDA_ENV="${CONDA_ENV:-rplot}"
+BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-GCC-12.3.0}"
 
 if command -v module >/dev/null 2>&1; then
-    if module load miniforge/25.3.0-3 >/dev/null 2>&1; then
-        log_info "Loaded miniforge/25.3.0-3 module"
-    else
-        log_warn "Failed to load miniforge/25.3.0-3 module"
-    fi
-    if module load bcftools >/dev/null 2>&1; then
-        log_info "Loaded bcftools module"
-    else
-        log_warn "Failed to load bcftools module"
-    fi
+    module load miniforge/25.3.0-3
+    log_info "Loaded miniforge/25.3.0-3 module"
+    module load "${BCFTOOLS_MODULE}"
+    log_info "Loaded ${BCFTOOLS_MODULE} module"
 fi
 
 conda_activated=false
@@ -180,7 +175,7 @@ if [[ "${conda_activated}" != "true" ]]; then
     log_warn "Continuing without activating conda env; ensure bcftools, python, and R are available."
 fi
 
-ensure_bcftools || exit 1
+require_cmd bcftools || exit 1
 require_cmd Rscript || exit 1
 
 maybe_index() {
