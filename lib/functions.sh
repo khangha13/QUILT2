@@ -35,11 +35,13 @@ ensure_bcftools() {
     fi
     if command -v module >/dev/null 2>&1; then
         if [[ -n "${BCFTOOLS_MODULE:-}" ]]; then
-            if module load "${BCFTOOLS_MODULE}" >/dev/null 2>&1; then
+            if module load "${BCFTOOLS_MODULE}"; then
                 log_info "Loaded ${BCFTOOLS_MODULE} module for bcftools"
             else
                 log_warn "Failed to load ${BCFTOOLS_MODULE}; bcftools still unavailable"
             fi
+        else
+            log_warn "BCFTOOLS_MODULE not set; cannot auto-load bcftools."
         fi
     else
         log_warn "module command not found; cannot auto-load bcftools."
