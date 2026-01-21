@@ -22,7 +22,8 @@ Notes:
   - Extra args after -- are forwarded to utils/dosage_r2.sh (e.g., --samples FILE --region chr1:1-1e6 --no-parquet --use-vcfpp).
   - Resources/logs honor QUILT2_* env if set (ACCOUNT, PARTITION, QOS, CPUS_PER_TASK, MEMORY, TIME_LIMIT).
   - Logs are written to <out_dir>/slurm/dosage_r2_%j.(out|err).
-  - Requires bcftools, python (with pysam), Rscript (with data.table/arrow, vcfppR optional).
+  - Requires miniforge module and conda env myenv_py310 (override MINIFORGE_MODULE/CONDA_ENV),
+    plus bcftools and Rscript (data.table/arrow, vcfppR optional).
 EOF
 }
 

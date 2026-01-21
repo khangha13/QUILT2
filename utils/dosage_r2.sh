@@ -39,6 +39,10 @@ Options:
   --keep-temp           Do not delete the temporary working directory.
   --help                Show this message and exit.
 
+Environment:
+  - Loads module "${MINIFORGE_MODULE:-miniforge}" and activates conda env "${CONDA_ENV:-myenv_py310}".
+  - Override with MINIFORGE_MODULE and CONDA_ENV environment variables.
+
 Outputs (PREFIX.*):
   metrics.tsv           Per-variant metrics (r2, concordance, maf, counts)
   summary.tsv           Overall summary metrics
@@ -136,41 +140,39 @@ trap cleanup EXIT
 
 log_info "Temporary working directory: ${TMP_DIR}"
 
-# Activate 'rplot' conda environment (similar to step1d)
-CONDA_ENV="${CONDA_ENV:-rplot}"
+# Activate conda environment (explicit, no fallback).
+CONDA_ENV="${CONDA_ENV:-myenv_py310}"
+MINIFORGE_MODULE="${MINIFORGE_MODULE:-miniforge}"
 BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-GCC-12.3.0}"
 
 if command -v module >/dev/null 2>&1; then
-    module load miniforge/25.3.0-3
-    log_info "Loaded miniforge/25.3.0-3 module"
-fi
-
-conda_activated=false
-if [[ -n "${ROOTMINIFORGE:-}" && -f "${ROOTMINIFORGE}/etc/profile.d/conda.sh" ]]; then
-    # shellcheck source=/dev/null
-    source "${ROOTMINIFORGE}/etc/profile.d/conda.sh"
-    if conda activate "${CONDA_ENV}" >/dev/null 2>&1; then
-        log_info "Conda environment '${CONDA_ENV}' activated"
-        conda_activated=true
+    if module load "${MINIFORGE_MODULE}" >/dev/null 2>&1; then
+        log_info "Loaded ${MINIFORGE_MODULE} module"
     else
-        log_warn "Failed to activate conda environment: ${CONDA_ENV}"
+        log_error "Failed to load module: ${MINIFORGE_MODULE}"
+        exit 1
     fi
-elif command -v conda >/dev/null 2>&1; then
-    conda_base="$(conda info --base 2>/dev/null || true)"
-    if [[ -n "${conda_base}" && -f "${conda_base}/etc/profile.d/conda.sh" ]]; then
-        # shellcheck source=/dev/null
-        source "${conda_base}/etc/profile.d/conda.sh"
-        if conda activate "${CONDA_ENV}" >/dev/null 2>&1; then
-            log_info "Conda environment '${CONDA_ENV}' activated"
-            conda_activated=true
-        else
-            log_warn "Failed to activate conda environment: ${CONDA_ENV}"
-        fi
-    fi
+else
+    log_error "module command not found; cannot load ${MINIFORGE_MODULE}"
+    exit 1
 fi
 
-if [[ "${conda_activated}" != "true" ]]; then
-    log_warn "Continuing without activating conda env; ensure bcftools, python, and R are available."
+if [[ -z "${ROOTMINIFORGE:-}" ]]; then
+    log_error "ROOTMINIFORGE is not set; cannot source conda.sh"
+    exit 1
+fi
+if [[ ! -f "${ROOTMINIFORGE}/etc/profile.d/conda.sh" ]]; then
+    log_error "conda.sh not found at ${ROOTMINIFORGE}/etc/profile.d/conda.sh"
+    exit 1
+fi
+
+# shellcheck source=/dev/null
+source "${ROOTMINIFORGE}/etc/profile.d/conda.sh"
+if conda activate "${CONDA_ENV}" >/dev/null 2>&1; then
+    log_info "Conda environment '${CONDA_ENV}' activated"
+else
+    log_error "Failed to activate conda environment: ${CONDA_ENV}"
+    exit 1
 fi
 
 ensure_bcftools || exit 1
@@ -187,7 +189,7 @@ maybe_index "${IMPUTED_VCF}"
 maybe_index "${TRUTH_VCF}"
 
 # Recode imputed VCF to array-style genotypes to align with array output.
-PYTHON_BIN="${PYTHON_BIN:-python}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 ARRAY_SCRIPT="${ROOT_DIR}/utils/wgs_to_array_vcf.py"
 if [[ ! -f "${ARRAY_SCRIPT}" ]]; then
     log_error "Recoder not found: ${ARRAY_SCRIPT}"
