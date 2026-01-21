@@ -53,7 +53,8 @@ QUILT2_CONSTRAINT="${QUILT2_CONSTRAINT:-epyc4}" # constrain to known-good nodes
 # -----------------------------------------------------------------------------
 
 # bcftools module name to load if bcftools not on PATH
-BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-GCC-12.3.0}"
+# NOTE: Module names can be case-sensitive on HPC (see GATK pipeline incident log).
+BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}"
 
 # Conda environment for QUILT2 scripts
 QUILT2_CONDA_ENV="${QUILT2_CONDA_ENV:-quilt2}"

@@ -13,7 +13,7 @@ SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C 
 ## Prerequisites
 - Bash, SLURM.
 - `Rscript` with QUILT2 scripts available (`QUILT2_prepare_reference.R`, `QUILT2.R`) via `--quilt2-home` or explicit `--quilt2-*` paths.
-- `bcftools` on PATH or loadable via `BCFTOOLS_MODULE` (default `bcftools/1.18-GCC-12.3.0`).
+- `bcftools` on PATH or loadable via `BCFTOOLS_MODULE` (default `bcftools/1.18-gcc-12.3.0`).
 - Optional: conda env name via `QUILT2_CONDA_ENV` (default `quilt2`); module `miniforge/25.3.0-3` loaded if present.
 
 ## Configuration (environment.sh)

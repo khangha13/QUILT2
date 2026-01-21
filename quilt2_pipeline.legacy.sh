@@ -98,7 +98,7 @@ MIN_VALID_GT_RATE="0.95"
 PREP_ONLY="false"
 IMPUTE_ONLY="false"
 DRY_RUN="false"
-BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-GCC-12.3.0}"
+BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

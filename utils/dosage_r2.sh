@@ -143,7 +143,7 @@ log_info "Temporary working directory: ${TMP_DIR}"
 # Activate conda environment (explicit, no fallback).
 CONDA_ENV="${CONDA_ENV:-myenv_py310}"
 MINIFORGE_MODULE="${MINIFORGE_MODULE:-miniforge}"
-BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-GCC-12.3.0}"
+BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}"
 
 if command -v module >/dev/null 2>&1; then
     if module load "${MINIFORGE_MODULE}" >/dev/null 2>&1; then
