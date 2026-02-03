@@ -175,7 +175,34 @@ else
     exit 1
 fi
 
+ensure_rscript() {
+    if command -v Rscript >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # Auto-fix for missing Rscript: install R + required packages into the active conda env.
+    # This matches the recommended manual fix:
+    #   conda activate myenv_py310
+    #   conda install -y r-base r-data.table r-ggplot2 r-arrow
+    if ! command -v conda >/dev/null 2>&1; then
+        log_error "Rscript not found, and conda is not available to install it."
+        return 1
+    fi
+
+    log_warn "Rscript not found; installing R into conda env '${CONDA_ENV}'"
+    if ! conda install -y r-base r-data.table r-ggplot2 r-arrow; then
+        log_error "Failed to install R packages into conda env '${CONDA_ENV}'."
+        return 1
+    fi
+
+    if ! command -v Rscript >/dev/null 2>&1; then
+        log_error "Rscript still not found after conda install in env '${CONDA_ENV}'."
+        return 1
+    fi
+}
+
 ensure_bcftools || exit 1
+ensure_rscript || exit 1
 require_cmd Rscript || exit 1
 
 maybe_index() {
