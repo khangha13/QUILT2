@@ -89,6 +89,30 @@ load_gt_table <- function(path) {
   list(meta = meta, mat = mat, samples = colnames(dt)[-(1:5)])
 }
 
+variant_key <- function(meta_dt) {
+  # Stable join key independent of VCF ID field.
+  paste(meta_dt$CHROM, meta_dt$POS, meta_dt$REF, meta_dt$ALT, sep = ":")
+}
+
+align_to_truth <- function(truth_meta, imputed_meta, imputed_mat, label = "imputed") {
+  tk <- variant_key(truth_meta)
+  ik <- variant_key(imputed_meta)
+
+  if (anyDuplicated(tk)) stop("Truth table has duplicated variants by (CHROM,POS,REF,ALT)")
+  if (anyDuplicated(ik)) stop(label, " table has duplicated variants by (CHROM,POS,REF,ALT)")
+
+  idx <- match(tk, ik)
+  if (any(is.na(idx))) {
+    missing_keys <- tk[is.na(idx)]
+    stop(label, " table is missing ", length(missing_keys),
+         " truth variants by (CHROM,POS,REF,ALT). Example missing key: ",
+         missing_keys[[1]])
+  }
+
+  # Reorder to match truth. Use truth metadata (including ID) for downstream outputs.
+  list(meta = truth_meta, mat = imputed_mat[idx, , drop = FALSE])
+}
+
 gp_to_ds <- function(gp_mat) {
   flat <- as.vector(gp_mat)
   split <- tstrsplit(flat, ",", fixed = TRUE)
@@ -197,18 +221,18 @@ sample_order <- truth_gt$samples
 
 if (!is.null(opts$imputed_gt)) {
   imputed_gt <- load_gt_table(opts$imputed_gt)
-  if (!identical(imputed_gt$meta, variant_meta)) {
-    stop("Imputed GT table differs from truth in variant ordering/metadata")
-  }
+  aligned <- align_to_truth(variant_meta, imputed_gt$meta, imputed_gt$mat, label = "Imputed GT")
+  imputed_gt$meta <- aligned$meta
+  imputed_gt$mat <- aligned$mat
   if (!identical(imputed_gt$samples, sample_order)) {
     stop("Imputed GT table sample order differs from truth")
   }
   ds_mat <- gt_to_dosage(imputed_gt$mat)
 } else {
   imputed_ds <- load_ds_table(opts$imputed_ds)
-  if (!identical(imputed_ds$meta, variant_meta)) {
-    stop("Imputed and truth tables have different variant ordering or metadata")
-  }
+  aligned <- align_to_truth(variant_meta, imputed_ds$meta, imputed_ds$mat, label = "Imputed DS")
+  imputed_ds$meta <- aligned$meta
+  imputed_ds$mat <- aligned$mat
   if (!identical(imputed_ds$samples, sample_order)) {
     stop("Imputed and truth tables have different sample ordering")
   }
@@ -216,18 +240,21 @@ if (!is.null(opts$imputed_gt)) {
 
   if (all(is.na(ds_mat)) && !is.null(opts$imputed_gp)) {
     gp_tbl <- load_gt_table(opts$imputed_gp)
-    if (!identical(gp_tbl$meta, imputed_ds$meta) || !identical(gp_tbl$samples, imputed_ds$samples)) {
-      stop("GP table does not match DS table in ordering")
-    }
+    if (!identical(gp_tbl$samples, imputed_ds$samples)) stop("GP table sample order does not match DS table")
+    gp_aligned <- align_to_truth(variant_meta, gp_tbl$meta, gp_tbl$mat, label = "Imputed GP")
+    gp_tbl$meta <- gp_aligned$meta
+    gp_tbl$mat <- gp_aligned$mat
     ds_from_gp <- gp_to_ds(gp_tbl$mat)
     ds_mat <- ds_from_gp
   } else if (!is.null(opts$imputed_gp)) {
     gp_tbl <- load_gt_table(opts$imputed_gp)
-    if (identical(gp_tbl$meta, imputed_ds$meta) && identical(gp_tbl$samples, imputed_ds$samples)) {
-      ds_from_gp <- gp_to_ds(gp_tbl$mat)
-      replace_idx <- is.na(ds_mat)
-      ds_mat[replace_idx] <- ds_from_gp[replace_idx]
-    }
+    if (!identical(gp_tbl$samples, imputed_ds$samples)) stop("GP table sample order does not match DS table")
+    gp_aligned <- align_to_truth(variant_meta, gp_tbl$meta, gp_tbl$mat, label = "Imputed GP")
+    gp_tbl$meta <- gp_aligned$meta
+    gp_tbl$mat <- gp_aligned$mat
+    ds_from_gp <- gp_to_ds(gp_tbl$mat)
+    replace_idx <- is.na(ds_mat)
+    ds_mat[replace_idx] <- ds_from_gp[replace_idx]
   }
 
   if (all(is.na(ds_mat))) {
