@@ -43,14 +43,28 @@ Environment:
   - Loads module "${MINIFORGE_MODULE:-miniforge}" and activates conda env "${CONDA_ENV:-myenv_py310}".
   - Override with MINIFORGE_MODULE and CONDA_ENV environment variables.
 
+Contig Name Handling:
+  The canonical contig style is "ChrNN" (e.g., Chr01, Chr02, Chr17).
+  The script automatically detects and normalizes contig naming conventions.
+  Supported styles: "Chr01" (ChrNN), "chr1" (chrN), "1" (N).
+  Any VCF using a non-canonical style is automatically renamed to ChrNN format.
+
+Position-Only Intersection:
+  The script uses position-only matching (CHROM + POS) to find common variants, which is
+  faster and more robust than allele-aware intersection. After finding common positions:
+    1. REF/ALT consistency is checked at each position
+    2. Positions with REF/ALT mismatches are logged and reported (*.refalt_mismatches.tsv)
+    3. Only positions with matching REF/ALT are used for concordance/r2 calculation
+
 Outputs (PREFIX.*):
-  metrics.tsv           Per-variant metrics (r2, concordance, maf, counts)
-  summary.tsv           Overall summary metrics
-  maf_bins.tsv          Metrics summarized by MAF bins
-  concordance.parquet   Wide per-site/per-sample concordance (0/1/NA)
-  r2_hist.png           Distribution of r2 (if plots enabled)
-  concordance_hist.png  Distribution of concordance (if plots enabled)
-  r2_vs_maf.png         Scatter/hex plot of r2 vs MAF (if plots enabled)
+  metrics.tsv              Per-variant metrics (r2, concordance, maf, counts)
+  summary.tsv              Overall summary metrics
+  maf_bins.tsv             Metrics summarized by MAF bins
+  concordance.parquet      Wide per-site/per-sample concordance (0/1/NA)
+  refalt_mismatches.tsv    Positions where REF/ALT differs (if any)
+  r2_hist.png              Distribution of r2 (if plots enabled)
+  concordance_hist.png     Distribution of concordance (if plots enabled)
+  r2_vs_maf.png            Scatter/hex plot of r2 vs MAF (if plots enabled)
 EOF
 }
 
@@ -233,7 +247,179 @@ log_info "Recoding imputed VCF to array scale"
 run_cmd "${PYTHON_BIN}" "${ARRAY_SCRIPT}" -i "${IMPUTED_VCF}" -o "${IMPUTED_ARRAY}"
 
 run_cmd bcftools index -f -c "${IMPUTED_ARRAY}"
-maybe_index "${TRUTH_VCF}"
+
+# =============================================================================
+# CONTIG NAME DETECTION AND NORMALIZATION
+# =============================================================================
+# Detect contig naming conventions in each VCF and create rename maps if needed.
+# Common patterns: "Chr01", "chr1", "1", "NC_..." etc.
+
+detect_contig_style() {
+    local vcf="$1"
+    local first_contig
+    first_contig="$(bcftools view -H "${vcf}" 2>/dev/null | head -1 | cut -f1)"
+    if [[ -z "${first_contig}" ]]; then
+        # Fallback to header contigs
+        first_contig="$(bcftools view -h "${vcf}" 2>/dev/null | grep '^##contig=<ID=' | head -1 | sed 's/.*ID=\([^,>]*\).*/\1/')"
+    fi
+    
+    if [[ "${first_contig}" =~ ^Chr[0-9]+ ]]; then
+        echo "ChrNN"  # e.g., Chr01, Chr02
+    elif [[ "${first_contig}" =~ ^chr[0-9]+ ]]; then
+        echo "chrN"   # e.g., chr1, chr2
+    elif [[ "${first_contig}" =~ ^[0-9]+$ ]]; then
+        echo "N"      # e.g., 1, 2
+    else
+        echo "other"  # Unknown pattern
+    fi
+}
+
+# Build a contig rename map file: OLD_NAME<TAB>NEW_NAME
+# Converts source style to target style for chromosomes 1-17 (apple) plus common others
+build_contig_rename_map() {
+    local source_style="$1"
+    local target_style="$2"
+    local map_file="$3"
+    
+    : > "${map_file}"
+    
+    for i in $(seq 1 22); do  # Cover up to 22 for generality (human) + apple 1-17
+        local src_name tgt_name
+        case "${source_style}" in
+            ChrNN) src_name="$(printf 'Chr%02d' "${i}")" ;;
+            chrN)  src_name="chr${i}" ;;
+            N)     src_name="${i}" ;;
+            *)     src_name="${i}" ;;
+        esac
+        case "${target_style}" in
+            ChrNN) tgt_name="$(printf 'Chr%02d' "${i}")" ;;
+            chrN)  tgt_name="chr${i}" ;;
+            N)     tgt_name="${i}" ;;
+            *)     tgt_name="${i}" ;;
+        esac
+        if [[ "${src_name}" != "${tgt_name}" ]]; then
+            printf '%s\t%s\n' "${src_name}" "${tgt_name}" >> "${map_file}"
+        fi
+    done
+    
+    # Also handle X, Y, M/MT if present
+    for special in X Y M MT; do
+        local src_name tgt_name
+        case "${source_style}" in
+            ChrNN) src_name="Chr${special}" ;;
+            chrN)  src_name="chr${special}" ;;
+            N)     src_name="${special}" ;;
+            *)     src_name="${special}" ;;
+        esac
+        case "${target_style}" in
+            ChrNN) tgt_name="Chr${special}" ;;
+            chrN)  tgt_name="chr${special}" ;;
+            N)     tgt_name="${special}" ;;
+            *)     tgt_name="${special}" ;;
+        esac
+        if [[ "${src_name}" != "${tgt_name}" ]]; then
+            printf '%s\t%s\n' "${src_name}" "${tgt_name}" >> "${map_file}"
+        fi
+    done
+}
+
+# Normalize contig names in a VCF to match target style
+normalize_contigs() {
+    local input_vcf="$1"
+    local output_vcf="$2"
+    local rename_map="$3"
+    
+    if [[ ! -s "${rename_map}" ]]; then
+        # No renaming needed; just copy/link
+        cp "${input_vcf}" "${output_vcf}"
+    else
+        log_info "Renaming contigs using map: ${rename_map}"
+        run_cmd bcftools annotate --rename-chrs "${rename_map}" "${input_vcf}" -Oz -o "${output_vcf}"
+    fi
+    run_cmd bcftools index -f -c "${output_vcf}"
+}
+
+log_info "Detecting contig naming conventions"
+IMPUTED_CONTIG_STYLE="$(detect_contig_style "${IMPUTED_ARRAY}")"
+TRUTH_CONTIG_STYLE="$(detect_contig_style "${TRUTH_VCF}")"
+log_info "Imputed VCF contig style: ${IMPUTED_CONTIG_STYLE}"
+log_info "Truth VCF contig style: ${TRUTH_CONTIG_STYLE}"
+
+# Canonical contig style is ChrNN (e.g., Chr01, Chr02). Normalize any deviant VCFs.
+CANONICAL_STYLE="ChrNN"
+
+IMPUTED_NORMALIZED="${IMPUTED_ARRAY}"
+if [[ "${IMPUTED_CONTIG_STYLE}" != "${CANONICAL_STYLE}" ]]; then
+    log_warn "Imputed VCF uses '${IMPUTED_CONTIG_STYLE}' contigs. Normalizing to canonical '${CANONICAL_STYLE}'."
+    CONTIG_RENAME_MAP="${TMP_DIR}/imputed_contig_rename.map"
+    build_contig_rename_map "${IMPUTED_CONTIG_STYLE}" "${CANONICAL_STYLE}" "${CONTIG_RENAME_MAP}"
+    if [[ -s "${CONTIG_RENAME_MAP}" ]]; then
+        log_info "Imputed contig rename map (first 10 entries):"
+        head -10 "${CONTIG_RENAME_MAP}" >&2 || true
+        IMPUTED_NORMALIZED="${TMP_DIR}/imputed.array.renamed.vcf.gz"
+        normalize_contigs "${IMPUTED_ARRAY}" "${IMPUTED_NORMALIZED}" "${CONTIG_RENAME_MAP}"
+    else
+        log_warn "No rename mappings generated for imputed; proceeding with original contig names."
+    fi
+fi
+
+TRUTH_NORMALIZED="${TRUTH_VCF}"
+if [[ "${TRUTH_CONTIG_STYLE}" != "${CANONICAL_STYLE}" ]]; then
+    log_warn "Truth VCF uses '${TRUTH_CONTIG_STYLE}' contigs. Normalizing to canonical '${CANONICAL_STYLE}'."
+    CONTIG_RENAME_MAP="${TMP_DIR}/truth_contig_rename.map"
+    build_contig_rename_map "${TRUTH_CONTIG_STYLE}" "${CANONICAL_STYLE}" "${CONTIG_RENAME_MAP}"
+    if [[ -s "${CONTIG_RENAME_MAP}" ]]; then
+        log_info "Truth contig rename map (first 10 entries):"
+        head -10 "${CONTIG_RENAME_MAP}" >&2 || true
+        TRUTH_NORMALIZED="${TMP_DIR}/truth.renamed.vcf.gz"
+        normalize_contigs "${TRUTH_VCF}" "${TRUTH_NORMALIZED}" "${CONTIG_RENAME_MAP}"
+    else
+        log_warn "No rename mappings generated for truth; proceeding with original contig names."
+    fi
+fi
+
+# =============================================================================
+# POSITION-ONLY INTERSECTION (ignoring REF/ALT)
+# =============================================================================
+# This approach finds overlapping positions first, then filters each VCF to those
+# positions. REF/ALT may still differ at shared positions.
+#
+# NOTE: Potential future optimization - `bcftools isec -n=2 -c all` can perform
+# position-only matching directly and may be faster for large files. Example:
+#   bcftools isec -n=2 -c all imputed.vcf.gz truth.vcf.gz -p isec_output/
+# The current manual approach (bcftools query + comm) is kept for explicit control
+# and detailed logging of the intersection process.
+
+log_info "Extracting positions from each VCF (position-only intersection)"
+IMPUTED_POS="${TMP_DIR}/imputed.pos.txt"
+TRUTH_POS="${TMP_DIR}/truth.pos.txt"
+
+bcftools query -f '%CHROM\t%POS\n' "${IMPUTED_NORMALIZED}" | sort -u > "${IMPUTED_POS}"
+bcftools query -f '%CHROM\t%POS\n' "${TRUTH_NORMALIZED}" | sort -u > "${TRUTH_POS}"
+
+log_info "Finding common positions"
+COMMON_POS="${TMP_DIR}/common.pos.txt"
+comm -12 "${IMPUTED_POS}" "${TRUTH_POS}" > "${COMMON_POS}"
+
+COMMON_POS_COUNT="$(wc -l < "${COMMON_POS}" | tr -d ' ')"
+IMPUTED_POS_COUNT="$(wc -l < "${IMPUTED_POS}" | tr -d ' ')"
+TRUTH_POS_COUNT="$(wc -l < "${TRUTH_POS}" | tr -d ' ')"
+
+log_info "Position counts: imputed=${IMPUTED_POS_COUNT}, truth=${TRUTH_POS_COUNT}, common=${COMMON_POS_COUNT}"
+
+if [[ "${COMMON_POS_COUNT}" -eq 0 ]]; then
+    log_error "No overlapping positions found between VCFs."
+    log_error "This may indicate completely different contig names or genomic regions."
+    log_error "Sample imputed positions:"
+    head -5 "${IMPUTED_POS}" >&2 || true
+    log_error "Sample truth positions:"
+    head -5 "${TRUTH_POS}" >&2 || true
+    exit 1
+fi
+
+# Convert to regions format (CHROM<TAB>POS<TAB>POS) for bcftools -R
+SITE_LIST="${TMP_DIR}/sites.txt"
+awk -F'\t' 'BEGIN{OFS="\t"} {print $1, $2, $2}' "${COMMON_POS}" > "${SITE_LIST}"
 
 # Derive sample set
 SAMPLE_SET="${SAMPLE_FILE}"
@@ -254,19 +440,6 @@ else
     SAMPLE_SET="${TMP_DIR}/common.samples"
 fi
 
-# Intersect sites (allele-aware) and restrict to region if provided
-log_info "Intersecting sites between imputed and truth VCFs"
-ISEC_DIR="${TMP_DIR}/isec"
-mkdir -p "${ISEC_DIR}"
-run_cmd bcftools isec -c all -p "${ISEC_DIR}" -Oz "${IMPUTED_ARRAY}" "${TRUTH_VCF}"
-SITE_VCF="${ISEC_DIR}/0002.vcf.gz"
-if [[ ! -s "${SITE_VCF}" ]]; then
-    log_error "Intersection produced no common sites"
-    exit 1
-fi
-SITE_LIST="${TMP_DIR}/sites.txt"
-bcftools query -f '%CHROM\t%POS\t%POS\n' "${SITE_VCF}" > "${SITE_LIST}"
-
 REGION_ARGS=()
 if [[ -n "${REGION}" ]]; then
     REGION_ARGS=( -r "${REGION}" )
@@ -277,14 +450,101 @@ if [[ "${BIALLELIC_ONLY}" == "true" ]]; then
     BIALLELIC_ARGS=( -m2 -M2 -v snps )
 fi
 
-log_info "Extracting harmonized VCFs"
+log_info "Extracting VCFs at common positions"
+IMPUTED_POS_FILTERED="${TMP_DIR}/imputed.pos_filtered.vcf.gz"
+TRUTH_POS_FILTERED="${TMP_DIR}/truth.pos_filtered.vcf.gz"
+
+# Use the (contig-normalized) VCFs
+run_cmd bcftools view -R "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" -Oz -o "${IMPUTED_POS_FILTERED}" "${IMPUTED_NORMALIZED}"
+run_cmd bcftools view -R "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" -Oz -o "${TRUTH_POS_FILTERED}" "${TRUTH_NORMALIZED}"
+run_cmd bcftools index -f -c "${IMPUTED_POS_FILTERED}"
+run_cmd bcftools index -f -c "${TRUTH_POS_FILTERED}"
+
+# =============================================================================
+# REF/ALT DISCREPANCY ANALYSIS
+# =============================================================================
+# Since we did position-only matching, REF/ALT may differ. We need to:
+# 1. Report how many positions have matching vs mismatching REF/ALT
+# 2. Create final "harmonized" VCFs containing only positions where REF/ALT matches
+#    (comparing genotypes with swapped alleles is meaningless without strand flipping)
+
+log_info "Analyzing REF/ALT consistency at common positions"
+IMPUTED_ALLELES="${TMP_DIR}/imputed.alleles.tsv"
+TRUTH_ALLELES="${TMP_DIR}/truth.alleles.tsv"
+
+bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${IMPUTED_POS_FILTERED}" | sort -k1,1 -k2,2n > "${IMPUTED_ALLELES}"
+bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${TRUTH_POS_FILTERED}" | sort -k1,1 -k2,2n > "${TRUTH_ALLELES}"
+
+# Join on CHROM+POS and check REF/ALT match
+ALLELE_COMPARISON="${TMP_DIR}/allele_comparison.tsv"
+join -t$'\t' -j1 \
+    <(awk -F'\t' 'BEGIN{OFS="\t"} {print $1":"$2, $3, $4}' "${IMPUTED_ALLELES}" | sort -k1,1) \
+    <(awk -F'\t' 'BEGIN{OFS="\t"} {print $1":"$2, $3, $4}' "${TRUTH_ALLELES}" | sort -k1,1) \
+    > "${ALLELE_COMPARISON}" 2>/dev/null || true
+
+# Count matches and mismatches
+# Format: CHROM:POS<TAB>IMP_REF<TAB>IMP_ALT<TAB>TRUTH_REF<TAB>TRUTH_ALT
+MATCHING_ALLELES="${TMP_DIR}/matching_alleles.txt"
+MISMATCHING_ALLELES="${TMP_DIR}/mismatching_alleles.txt"
+
+awk -F'\t' '$2==$4 && $3==$5 {print $1}' "${ALLELE_COMPARISON}" > "${MATCHING_ALLELES}"
+awk -F'\t' '$2!=$4 || $3!=$5 {print $0}' "${ALLELE_COMPARISON}" > "${MISMATCHING_ALLELES}"
+
+MATCH_COUNT="$(wc -l < "${MATCHING_ALLELES}" | tr -d ' ')"
+MISMATCH_COUNT="$(wc -l < "${MISMATCHING_ALLELES}" | tr -d ' ')"
+TOTAL_COMPARED="$((MATCH_COUNT + MISMATCH_COUNT))"
+
+log_info "REF/ALT comparison: ${MATCH_COUNT}/${TOTAL_COMPARED} positions have matching alleles"
+
+if [[ "${MISMATCH_COUNT}" -gt 0 ]]; then
+    MISMATCH_PCT="$(awk "BEGIN {printf \"%.2f\", ${MISMATCH_COUNT}/${TOTAL_COMPARED}*100}")"
+    log_warn "${MISMATCH_COUNT} positions (${MISMATCH_PCT}%) have REF/ALT discrepancies"
+    log_warn "Sample mismatches (CHROM:POS<TAB>IMP_REF<TAB>IMP_ALT<TAB>TRUTH_REF<TAB>TRUTH_ALT):"
+    head -10 "${MISMATCHING_ALLELES}" >&2 || true
+    
+    # Write full mismatch report to output dir
+    MISMATCH_REPORT="${OUT_PREFIX}.refalt_mismatches.tsv"
+    {
+        echo -e "CHROM_POS\tIMPUTED_REF\tIMPUTED_ALT\tTRUTH_REF\tTRUTH_ALT"
+        cat "${MISMATCHING_ALLELES}"
+    } > "${MISMATCH_REPORT}"
+    log_info "Full REF/ALT mismatch report written to: ${MISMATCH_REPORT}"
+fi
+
+if [[ "${MATCH_COUNT}" -eq 0 ]]; then
+    log_error "No positions have matching REF/ALT. Cannot compute meaningful concordance/r2."
+    log_error "This may indicate strand issues, different reference genomes, or allele encoding differences."
+    exit 1
+fi
+
+# Create final harmonized VCFs with only REF/ALT-matching positions
+log_info "Creating final harmonized VCFs (${MATCH_COUNT} positions with matching REF/ALT)"
+MATCHING_SITES="${TMP_DIR}/matching_sites.txt"
+# Convert CHROM:POS back to CHROM<TAB>POS<TAB>POS format
+sed 's/:/\t/; s/$/\t/' "${MATCHING_ALLELES}" | awk -F'\t' 'BEGIN{OFS="\t"} {print $1, $2, $2}' > "${MATCHING_SITES}"
+
 IMPUTED_COMMON="${TMP_DIR}/imputed.common.vcf.gz"
 TRUTH_COMMON="${TMP_DIR}/truth.common.vcf.gz"
 
-run_cmd bcftools view -R "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" -Oz -o "${IMPUTED_COMMON}" "${IMPUTED_ARRAY}"
-run_cmd bcftools view -R "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" -Oz -o "${TRUTH_COMMON}" "${TRUTH_VCF}"
+run_cmd bcftools view -R "${MATCHING_SITES}" "${IMPUTED_POS_FILTERED}" -Oz -o "${IMPUTED_COMMON}"
+run_cmd bcftools view -R "${MATCHING_SITES}" "${TRUTH_POS_FILTERED}" -Oz -o "${TRUTH_COMMON}"
 run_cmd bcftools index -f -c "${IMPUTED_COMMON}"
 run_cmd bcftools index -f -c "${TRUTH_COMMON}"
+
+# Final sanity check: (CHROM,POS,REF,ALT) should now match exactly
+log_info "Final sanity check on harmonized VCFs"
+IMPUTED_META_SORTED="${TMP_DIR}/imputed.meta.sorted.tsv"
+TRUTH_META_SORTED="${TMP_DIR}/truth.meta.sorted.tsv"
+bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${IMPUTED_COMMON}" | sort -k1,1 -k2,2n -k3,3 -k4,4 > "${IMPUTED_META_SORTED}"
+bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${TRUTH_COMMON}" | sort -k1,1 -k2,2n -k3,3 -k4,4 > "${TRUTH_META_SORTED}"
+
+if ! cmp -s "${IMPUTED_META_SORTED}" "${TRUTH_META_SORTED}"; then
+    log_error "Unexpected: harmonized VCFs still differ after filtering to matching REF/ALT. This is a bug."
+    log_error "First differences:"
+    diff "${IMPUTED_META_SORTED}" "${TRUTH_META_SORTED}" | head -20 >&2 || true
+    exit 1
+fi
+log_info "Sanity check passed: ${MATCH_COUNT} variants with identical (CHROM,POS,REF,ALT)"
 
 # Build header
 readarray -t SAMPLE_ORDER < "${SAMPLE_SET}"
