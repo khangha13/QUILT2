@@ -470,16 +470,38 @@ log_info "Filtering VCFs to ${COMMON_POS_COUNT} common positions"
 IMPUTED_COMMON="${TMP_DIR}/imputed.common.vcf.gz"
 TRUTH_COMMON="${TMP_DIR}/truth.common.vcf.gz"
 
-# Use -T (targets) for exact position matching; avoids extra records from -R region overlaps
-run_cmd bcftools view -T "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" -Oz -o "${IMPUTED_COMMON}" "${IMPUTED_NORMALIZED}"
-run_cmd bcftools view -T "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" -Oz -o "${TRUTH_COMMON}" "${TRUTH_NORMALIZED}"
+# Use -T (targets) for exact position matching; avoids extra records from -R region overlaps.
+# Pipe through `bcftools norm -d snps` to deduplicate multi-allelic sites that were
+# decomposed into multiple biallelic rows at the same position (keeps first record).
+IMPUTED_PREDEDUP="${TMP_DIR}/imputed.prededup.vcf.gz"
+TRUTH_PREDEDUP="${TMP_DIR}/truth.prededup.vcf.gz"
+
+run_cmd bcftools view -T "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" -Oz -o "${IMPUTED_PREDEDUP}" "${IMPUTED_NORMALIZED}"
+run_cmd bcftools view -T "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" -Oz -o "${TRUTH_PREDEDUP}" "${TRUTH_NORMALIZED}"
+run_cmd bcftools index -f -c "${IMPUTED_PREDEDUP}"
+run_cmd bcftools index -f -c "${TRUTH_PREDEDUP}"
+
+IMPUTED_PREDEDUP_COUNT="$(bcftools view -H "${IMPUTED_PREDEDUP}" | wc -l | tr -d ' ')"
+TRUTH_PREDEDUP_COUNT="$(bcftools view -H "${TRUTH_PREDEDUP}" | wc -l | tr -d ' ')"
+
+# Deduplicate: keep one SNP per position
+log_info "Deduplicating multi-allelic positions (imputed=${IMPUTED_PREDEDUP_COUNT}, truth=${TRUTH_PREDEDUP_COUNT})"
+run_cmd bcftools norm -d snps "${IMPUTED_PREDEDUP}" -Oz -o "${IMPUTED_COMMON}"
+run_cmd bcftools norm -d snps "${TRUTH_PREDEDUP}" -Oz -o "${TRUTH_COMMON}"
 run_cmd bcftools index -f -c "${IMPUTED_COMMON}"
 run_cmd bcftools index -f -c "${TRUTH_COMMON}"
 
 # Sanity check: both VCFs should have variants and positions should overlap
 IMPUTED_COMMON_COUNT="$(bcftools view -H "${IMPUTED_COMMON}" | wc -l | tr -d ' ')"
 TRUTH_COMMON_COUNT="$(bcftools view -H "${TRUTH_COMMON}" | wc -l | tr -d ' ')"
-log_info "Variants after filtering: imputed=${IMPUTED_COMMON_COUNT}, truth=${TRUTH_COMMON_COUNT}"
+log_info "Variants after dedup: imputed=${IMPUTED_COMMON_COUNT}, truth=${TRUTH_COMMON_COUNT}"
+
+if [[ "${IMPUTED_PREDEDUP_COUNT}" -ne "${IMPUTED_COMMON_COUNT}" ]]; then
+    log_warn "Removed $((IMPUTED_PREDEDUP_COUNT - IMPUTED_COMMON_COUNT)) duplicate position(s) from imputed VCF"
+fi
+if [[ "${TRUTH_PREDEDUP_COUNT}" -ne "${TRUTH_COMMON_COUNT}" ]]; then
+    log_warn "Removed $((TRUTH_PREDEDUP_COUNT - TRUTH_COMMON_COUNT)) duplicate position(s) from truth VCF"
+fi
 
 if [[ "${IMPUTED_COMMON_COUNT}" -eq 0 || "${TRUTH_COMMON_COUNT}" -eq 0 ]]; then
     log_error "No variants remaining after filtering. Check VCF content and contig naming."
