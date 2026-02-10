@@ -50,21 +50,23 @@ Contig Name Handling:
   Any VCF using a non-canonical style is automatically renamed to ChrNN format.
 
 Position-Only Intersection:
-  The script uses position-only matching (CHROM + POS) to find common variants, which is
-  faster and more robust than allele-aware intersection. After finding common positions:
-    1. REF/ALT consistency is checked at each position
-    2. Positions with REF/ALT mismatches are logged and reported (*.refalt_mismatches.tsv)
-    3. Only positions with matching REF/ALT are used for concordance/r2 calculation
+  The script uses position-only matching (CHROM + POS) to find common variants.
+  REF/ALT columns are allowed to differ between imputed and truth VCFs because the
+  AT/CG recoding (wgs_to_array_vcf.py) makes dosages comparable regardless of which
+  physical alleles appear as REF/ALT (array TOP-strand vs reference-genome alleles).
 
 Outputs (PREFIX.*):
-  metrics.tsv              Per-variant metrics (r2, concordance, maf, counts)
-  summary.tsv              Overall summary metrics
-  maf_bins.tsv             Metrics summarized by MAF bins
-  concordance.parquet      Wide per-site/per-sample concordance (0/1/NA)
-  refalt_mismatches.tsv    Positions where REF/ALT differs (if any)
-  r2_hist.png              Distribution of r2 (if plots enabled)
-  concordance_hist.png     Distribution of concordance (if plots enabled)
-  r2_vs_maf.png            Scatter/hex plot of r2 vs MAF (if plots enabled)
+  metrics.tsv                          Per-variant metrics (r2, concordance, maf, counts)
+  summary.tsv                          Overall summary metrics
+  maf_bins.tsv                         Metrics summarized by MAF bins
+  concordance.parquet                  Wide per-site/per-sample concordance (0/1/NA)
+  imputed.array_coded.common.vcf.gz   Translated imputed VCF at common positions
+  truth.common.vcf.gz                 Truth VCF at common positions
+  imputed.AB_format.tsv               Imputed genotypes in A/B format (A/A, A/B, B/B)
+  truth.AB_format.tsv                 Truth genotypes in A/B format (A/A, A/B, B/B)
+  r2_hist.png                          Distribution of r2 (if plots enabled)
+  concordance_hist.png                 Distribution of concordance (if plots enabled)
+  r2_vs_maf.png                        Scatter/hex plot of r2 vs MAF (if plots enabled)
 EOF
 }
 
@@ -417,9 +419,10 @@ if [[ "${COMMON_POS_COUNT}" -eq 0 ]]; then
     exit 1
 fi
 
-# Convert to regions format (CHROM<TAB>POS<TAB>POS) for bcftools -R
-SITE_LIST="${TMP_DIR}/sites.txt"
-awk -F'\t' 'BEGIN{OFS="\t"} {print $1, $2, $2}' "${COMMON_POS}" > "${SITE_LIST}"
+# Convert to targets format (CHROM<TAB>POS) for bcftools -T
+# Using -T instead of -R avoids pulling extra records at multi-allelic positions
+SITE_LIST="${TMP_DIR}/sites.tsv"
+awk -F'\t' 'BEGIN{OFS="\t"} {print $1, $2}' "${COMMON_POS}" > "${SITE_LIST}"
 
 # Derive sample set
 SAMPLE_SET="${SAMPLE_FILE}"
@@ -450,108 +453,117 @@ if [[ "${BIALLELIC_ONLY}" == "true" ]]; then
     BIALLELIC_ARGS=( -m2 -M2 -v snps )
 fi
 
-log_info "Extracting VCFs at common positions"
-IMPUTED_POS_FILTERED="${TMP_DIR}/imputed.pos_filtered.vcf.gz"
-TRUTH_POS_FILTERED="${TMP_DIR}/truth.pos_filtered.vcf.gz"
-
-# Use the (contig-normalized) VCFs
-run_cmd bcftools view -R "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" -Oz -o "${IMPUTED_POS_FILTERED}" "${IMPUTED_NORMALIZED}"
-run_cmd bcftools view -R "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" -Oz -o "${TRUTH_POS_FILTERED}" "${TRUTH_NORMALIZED}"
-run_cmd bcftools index -f -c "${IMPUTED_POS_FILTERED}"
-run_cmd bcftools index -f -c "${TRUTH_POS_FILTERED}"
-
 # =============================================================================
-# REF/ALT DISCREPANCY ANALYSIS
+# FILTER TO COMMON POSITIONS (position-only matching)
 # =============================================================================
-# Since we did position-only matching, REF/ALT may differ. We need to:
-# 1. Report how many positions have matching vs mismatching REF/ALT
-# 2. Create final "harmonized" VCFs containing only positions where REF/ALT matches
-#    (comparing genotypes with swapped alleles is meaningless without strand flipping)
+# The AT/CG recoding (wgs_to_array_vcf.py) makes dosages comparable even when
+# REF/ALT columns differ between imputed and truth VCFs. The array truth VCF
+# uses TOP-strand allele coding (e.g., REF=A ALT=G) while the imputed VCF
+# preserves reference-genome alleles (e.g., REF=T ALT=C). Since the AT/CG
+# grouping is strand-invariant (A<->T both map to group 0, C<->G both map to
+# group 1), the GT dosage (0/0->0, 0/1->1, 1/1->2) is identical regardless
+# of which physical alleles are listed as REF/ALT.
+#
+# Therefore we match on (CHROM, POS) only and skip REF/ALT filtering.
 
-log_info "Analyzing REF/ALT consistency at common positions"
-IMPUTED_ALLELES="${TMP_DIR}/imputed.alleles.tsv"
-TRUTH_ALLELES="${TMP_DIR}/truth.alleles.tsv"
-
-bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${IMPUTED_POS_FILTERED}" | sort -k1,1 -k2,2n > "${IMPUTED_ALLELES}"
-bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${TRUTH_POS_FILTERED}" | sort -k1,1 -k2,2n > "${TRUTH_ALLELES}"
-
-# Join on CHROM+POS and check REF/ALT match
-ALLELE_COMPARISON="${TMP_DIR}/allele_comparison.tsv"
-join -t$'\t' -j1 \
-    <(awk -F'\t' 'BEGIN{OFS="\t"} {print $1":"$2, $3, $4}' "${IMPUTED_ALLELES}" | sort -k1,1) \
-    <(awk -F'\t' 'BEGIN{OFS="\t"} {print $1":"$2, $3, $4}' "${TRUTH_ALLELES}" | sort -k1,1) \
-    > "${ALLELE_COMPARISON}" 2>/dev/null || true
-
-# Count matches and mismatches
-# Format: CHROM:POS<TAB>IMP_REF<TAB>IMP_ALT<TAB>TRUTH_REF<TAB>TRUTH_ALT
-MATCHING_ALLELES="${TMP_DIR}/matching_alleles.txt"
-MISMATCHING_ALLELES="${TMP_DIR}/mismatching_alleles.txt"
-
-awk -F'\t' '$2==$4 && $3==$5 {print $1}' "${ALLELE_COMPARISON}" > "${MATCHING_ALLELES}"
-awk -F'\t' '$2!=$4 || $3!=$5 {print $0}' "${ALLELE_COMPARISON}" > "${MISMATCHING_ALLELES}"
-
-MATCH_COUNT="$(wc -l < "${MATCHING_ALLELES}" | tr -d ' ')"
-MISMATCH_COUNT="$(wc -l < "${MISMATCHING_ALLELES}" | tr -d ' ')"
-TOTAL_COMPARED="$((MATCH_COUNT + MISMATCH_COUNT))"
-
-log_info "REF/ALT comparison: ${MATCH_COUNT}/${TOTAL_COMPARED} positions have matching alleles"
-
-if [[ "${MISMATCH_COUNT}" -gt 0 ]]; then
-    MISMATCH_PCT="$(awk "BEGIN {printf \"%.2f\", ${MISMATCH_COUNT}/${TOTAL_COMPARED}*100}")"
-    log_warn "${MISMATCH_COUNT} positions (${MISMATCH_PCT}%) have REF/ALT discrepancies"
-    log_warn "Sample mismatches (CHROM:POS<TAB>IMP_REF<TAB>IMP_ALT<TAB>TRUTH_REF<TAB>TRUTH_ALT):"
-    head -10 "${MISMATCHING_ALLELES}" >&2 || true
-    
-    # Write full mismatch report to output dir
-    MISMATCH_REPORT="${OUT_PREFIX}.refalt_mismatches.tsv"
-    {
-        echo -e "CHROM_POS\tIMPUTED_REF\tIMPUTED_ALT\tTRUTH_REF\tTRUTH_ALT"
-        cat "${MISMATCHING_ALLELES}"
-    } > "${MISMATCH_REPORT}"
-    log_info "Full REF/ALT mismatch report written to: ${MISMATCH_REPORT}"
-fi
-
-if [[ "${MATCH_COUNT}" -eq 0 ]]; then
-    log_error "No positions have matching REF/ALT. Cannot compute meaningful concordance/r2."
-    log_error "This may indicate strand issues, different reference genomes, or allele encoding differences."
-    exit 1
-fi
-
-# Create final harmonized VCFs with only REF/ALT-matching positions
-log_info "Creating final harmonized VCFs (${MATCH_COUNT} positions with matching REF/ALT)"
-MATCHING_SITES="${TMP_DIR}/matching_sites.txt"
-# Convert CHROM:POS back to CHROM<TAB>POS<TAB>POS format
-sed 's/:/\t/; s/$/\t/' "${MATCHING_ALLELES}" | awk -F'\t' 'BEGIN{OFS="\t"} {print $1, $2, $2}' > "${MATCHING_SITES}"
-
+log_info "Filtering VCFs to ${COMMON_POS_COUNT} common positions"
 IMPUTED_COMMON="${TMP_DIR}/imputed.common.vcf.gz"
 TRUTH_COMMON="${TMP_DIR}/truth.common.vcf.gz"
 
-run_cmd bcftools view -R "${MATCHING_SITES}" "${IMPUTED_POS_FILTERED}" -Oz -o "${IMPUTED_COMMON}"
-run_cmd bcftools view -R "${MATCHING_SITES}" "${TRUTH_POS_FILTERED}" -Oz -o "${TRUTH_COMMON}"
+# Use -T (targets) for exact position matching; avoids extra records from -R region overlaps
+run_cmd bcftools view -T "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" -Oz -o "${IMPUTED_COMMON}" "${IMPUTED_NORMALIZED}"
+run_cmd bcftools view -T "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" -Oz -o "${TRUTH_COMMON}" "${TRUTH_NORMALIZED}"
 run_cmd bcftools index -f -c "${IMPUTED_COMMON}"
 run_cmd bcftools index -f -c "${TRUTH_COMMON}"
 
-# Final sanity check: (CHROM,POS,REF,ALT) should now match exactly
-log_info "Final sanity check on harmonized VCFs"
-IMPUTED_META_SORTED="${TMP_DIR}/imputed.meta.sorted.tsv"
-TRUTH_META_SORTED="${TMP_DIR}/truth.meta.sorted.tsv"
-bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${IMPUTED_COMMON}" | sort -k1,1 -k2,2n -k3,3 -k4,4 > "${IMPUTED_META_SORTED}"
-bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${TRUTH_COMMON}" | sort -k1,1 -k2,2n -k3,3 -k4,4 > "${TRUTH_META_SORTED}"
+# Sanity check: both VCFs should have variants and positions should overlap
+IMPUTED_COMMON_COUNT="$(bcftools view -H "${IMPUTED_COMMON}" | wc -l | tr -d ' ')"
+TRUTH_COMMON_COUNT="$(bcftools view -H "${TRUTH_COMMON}" | wc -l | tr -d ' ')"
+log_info "Variants after filtering: imputed=${IMPUTED_COMMON_COUNT}, truth=${TRUTH_COMMON_COUNT}"
 
-if ! cmp -s "${IMPUTED_META_SORTED}" "${TRUTH_META_SORTED}"; then
-    log_error "Unexpected: harmonized VCFs still differ after filtering to matching REF/ALT. This is a bug."
-    log_error "First differences:"
-    diff "${IMPUTED_META_SORTED}" "${TRUTH_META_SORTED}" | head -20 >&2 || true
+if [[ "${IMPUTED_COMMON_COUNT}" -eq 0 || "${TRUTH_COMMON_COUNT}" -eq 0 ]]; then
+    log_error "No variants remaining after filtering. Check VCF content and contig naming."
     exit 1
 fi
-log_info "Sanity check passed: ${MATCH_COUNT} variants with identical (CHROM,POS,REF,ALT)"
 
-# Build header
+# Report position-level overlap (informational)
+bcftools query -f '%CHROM\t%POS\n' "${IMPUTED_COMMON}" | sort -u > "${TMP_DIR}/imputed.common.pos"
+bcftools query -f '%CHROM\t%POS\n' "${TRUTH_COMMON}" | sort -u > "${TMP_DIR}/truth.common.pos"
+SHARED_POS="$(comm -12 "${TMP_DIR}/imputed.common.pos" "${TMP_DIR}/truth.common.pos" | wc -l | tr -d ' ')"
+log_info "Shared positions in filtered VCFs: ${SHARED_POS}"
+
+# =============================================================================
+# SAVE TRANSLATED VCFs FOR FUTURE CONVENIENCE
+# =============================================================================
+# Copy the position-matched VCFs to the output prefix for reuse / inspection.
+
+IMPUTED_OUT_VCF="${OUT_PREFIX}.imputed.array_coded.common.vcf.gz"
+TRUTH_OUT_VCF="${OUT_PREFIX}.truth.common.vcf.gz"
+
+log_info "Saving translated VCFs for future convenience"
+cp "${IMPUTED_COMMON}" "${IMPUTED_OUT_VCF}"
+cp "${IMPUTED_COMMON}.csi" "${IMPUTED_OUT_VCF}.csi" 2>/dev/null || bcftools index -f -c "${IMPUTED_OUT_VCF}"
+cp "${TRUTH_COMMON}" "${TRUTH_OUT_VCF}"
+cp "${TRUTH_COMMON}.csi" "${TRUTH_OUT_VCF}.csi" 2>/dev/null || bcftools index -f -c "${TRUTH_OUT_VCF}"
+log_info "Saved: ${IMPUTED_OUT_VCF}"
+log_info "Saved: ${TRUTH_OUT_VCF}"
+
+# Build header (shared by A/B conversion and GT extraction below)
 readarray -t SAMPLE_ORDER < "${SAMPLE_SET}"
 HEADER="CHROM\tPOS\tREF\tALT\tID"
 for s in "${SAMPLE_ORDER[@]}"; do
     HEADER="${HEADER}\t${s}"
 done
+
+# =============================================================================
+# A/B FORMAT CONVERSION
+# =============================================================================
+# Produce TSV files with A/B genotypes for both imputed and truth VCFs.
+# In the AT/CG coding scheme:
+#   Allele index 0  =  AT group  →  A
+#   Allele index 1  =  CG group  →  B
+# So: 0/0 → A/A,  0/1 or 1/0 → A/B,  1/1 → B/B,  ./. → ./.
+# Phased genotypes (|) are also handled: 0|0 → A|A, 0|1 → A|B, etc.
+
+gt_to_ab() {
+    # Convert GT indices to A/B notation in a TSV stream (columns 6+ are GT fields).
+    # First line (header) is passed through unchanged.
+    awk -F'\t' 'BEGIN{OFS="\t"}
+    NR==1 {print; next}
+    {
+        for (i=6; i<=NF; i++) {
+            gt = $i
+            # Handle phased (|) and unphased (/)
+            if      (gt == "0/0" || gt == "0|0") $i = "A/A"
+            else if (gt == "0/1" || gt == "0|1") $i = "A/B"
+            else if (gt == "1/0" || gt == "1|0") $i = "B/A"
+            else if (gt == "1/1" || gt == "1|1") $i = "B/B"
+            else $i = "./."
+        }
+        print
+    }'
+}
+
+log_info "Generating A/B format genotype files"
+IMPUTED_AB_TSV="${OUT_PREFIX}.imputed.AB_format.tsv"
+TRUTH_AB_TSV="${OUT_PREFIX}.truth.AB_format.tsv"
+
+# Extract GT as indices, then pipe through gt_to_ab to convert
+{
+    echo -e "${HEADER}"
+    bcftools query -f "%CHROM\t%POS\t%REF\t%ALT\t%ID[\t%GT]\n" -S "${SAMPLE_SET}" "${IMPUTED_COMMON}"
+} | gt_to_ab > "${IMPUTED_AB_TSV}"
+
+{
+    echo -e "${HEADER}"
+    bcftools query -f "%CHROM\t%POS\t%REF\t%ALT\t%ID[\t%GT]\n" -S "${SAMPLE_SET}" "${TRUTH_COMMON}"
+} | gt_to_ab > "${TRUTH_AB_TSV}"
+
+IMPUTED_AB_VARIANTS="$(( $(wc -l < "${IMPUTED_AB_TSV}" | tr -d ' ') - 1 ))"
+TRUTH_AB_VARIANTS="$(( $(wc -l < "${TRUTH_AB_TSV}" | tr -d ' ') - 1 ))"
+log_info "A/B format files: imputed=${IMPUTED_AB_VARIANTS} variants, truth=${TRUTH_AB_VARIANTS} variants"
+log_info "Saved: ${IMPUTED_AB_TSV}"
+log_info "Saved: ${TRUTH_AB_TSV}"
 
 IMPUTED_GT_TSV="${TMP_DIR}/imputed_gt.tsv"
 TRUTH_GT_TSV="${TMP_DIR}/truth_gt.tsv"

@@ -90,22 +90,25 @@ load_gt_table <- function(path) {
 }
 
 variant_key <- function(meta_dt) {
-  # Stable join key independent of VCF ID field.
-  paste(meta_dt$CHROM, meta_dt$POS, meta_dt$REF, meta_dt$ALT, sep = ":")
+  # Position-only key: REF/ALT may differ between imputed (reference-genome
+  # alleles) and truth (array TOP-strand alleles). The AT/CG recoding in
+  # wgs_to_array_vcf.py guarantees dosage equivalence regardless of which
+  # physical alleles sit in the REF/ALT columns.
+  paste(meta_dt$CHROM, meta_dt$POS, sep = ":")
 }
 
 align_to_truth <- function(truth_meta, imputed_meta, imputed_mat, label = "imputed") {
   tk <- variant_key(truth_meta)
   ik <- variant_key(imputed_meta)
 
-  if (anyDuplicated(tk)) stop("Truth table has duplicated variants by (CHROM,POS,REF,ALT)")
-  if (anyDuplicated(ik)) stop(label, " table has duplicated variants by (CHROM,POS,REF,ALT)")
+  if (anyDuplicated(tk)) stop("Truth table has duplicated variants by (CHROM,POS)")
+  if (anyDuplicated(ik)) stop(label, " table has duplicated variants by (CHROM,POS)")
 
   idx <- match(tk, ik)
   if (any(is.na(idx))) {
     missing_keys <- tk[is.na(idx)]
     stop(label, " table is missing ", length(missing_keys),
-         " truth variants by (CHROM,POS,REF,ALT). Example missing key: ",
+         " truth variants by (CHROM,POS). Example missing key: ",
          missing_keys[[1]])
   }
 
