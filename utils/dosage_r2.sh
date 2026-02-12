@@ -85,6 +85,8 @@ Outputs (PREFIX.*):
   TRUTH_overlapped_only.vcf.gz                Truth VCF at common positions (deduped)
   IMPUTED_overlapped_unambiguous_only.vcf.gz  Imputed VCF after removing ambiguous loci
   TRUTH_overlapped_unambiguous_only.vcf.gz    Truth VCF after removing ambiguous loci
+  duplicates_removed.imputed.tsv              Duplicate positions removed from imputed VCF
+  duplicates_removed.truth.tsv                Duplicate positions removed from truth VCF
   ambiguous_loci_removed.tsv                  Strand-ambiguous positions that were removed
   imputed.AB_format.tsv                       Imputed genotypes in A/B format
   truth.AB_format.tsv                         Truth genotypes in A/B format
@@ -498,11 +500,49 @@ IMPUTED_OVERLAPPED_N="$(bcftools view -H "${IMPUTED_OVERLAPPED}" | wc -l | tr -d
 TRUTH_OVERLAPPED_N="$(bcftools view -H "${TRUTH_OVERLAPPED}" | wc -l | tr -d ' ')"
 log_info "Variants after dedup: imputed=${IMPUTED_OVERLAPPED_N}, truth=${TRUTH_OVERLAPPED_N}"
 
+# --- Record which positions were removed as duplicates ---
+# Compare pre-dedup vs post-dedup variant lists. Any (CHROM, POS, REF, ALT)
+# present in the pre-dedup file but absent from the post-dedup file was a
+# duplicate that got dropped by `bcftools norm -d snps`.
+
+IMPUTED_DUP_REPORT="${OUT_PREFIX}.duplicates_removed.imputed.tsv"
+TRUTH_DUP_REPORT="${OUT_PREFIX}.duplicates_removed.truth.tsv"
+
+report_removed_duplicates() {
+    # $1 = pre-dedup VCF, $2 = post-dedup VCF, $3 = output report, $4 = label
+    local prededup_vcf="$1" deduped_vcf="$2" report="$3" label="$4"
+    local pre_list="${TMP_DIR}/${label}.prededup.variants.txt"
+    local post_list="${TMP_DIR}/${label}.deduped.variants.txt"
+
+    bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${prededup_vcf}" | sort > "${pre_list}"
+    bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${deduped_vcf}"  | sort > "${post_list}"
+
+    # Lines in pre but not in post = removed duplicates.
+    {
+        echo -e "CHROM\tPOS\tREF\tALT"
+        comm -23 "${pre_list}" "${post_list}"
+    } > "${report}"
+}
+
 if [[ "${IMPUTED_PREDEDUP_N}" -ne "${IMPUTED_OVERLAPPED_N}" ]]; then
-    log_warn "Removed $((IMPUTED_PREDEDUP_N - IMPUTED_OVERLAPPED_N)) duplicate position(s) from imputed VCF"
+    IMPUTED_DUP_REMOVED=$((IMPUTED_PREDEDUP_N - IMPUTED_OVERLAPPED_N))
+    log_warn "Removed ${IMPUTED_DUP_REMOVED} duplicate position(s) from imputed VCF"
+    report_removed_duplicates "${IMPUTED_PREDEDUP}" "${IMPUTED_OVERLAPPED}" "${IMPUTED_DUP_REPORT}" "imputed"
+    log_info "Duplicate report (imputed): ${IMPUTED_DUP_REPORT}"
+else
+    # Write header-only file to keep output set consistent.
+    echo -e "CHROM\tPOS\tREF\tALT" > "${IMPUTED_DUP_REPORT}"
+    log_info "No duplicates removed from imputed VCF"
 fi
+
 if [[ "${TRUTH_PREDEDUP_N}" -ne "${TRUTH_OVERLAPPED_N}" ]]; then
-    log_warn "Removed $((TRUTH_PREDEDUP_N - TRUTH_OVERLAPPED_N)) duplicate position(s) from truth VCF"
+    TRUTH_DUP_REMOVED=$((TRUTH_PREDEDUP_N - TRUTH_OVERLAPPED_N))
+    log_warn "Removed ${TRUTH_DUP_REMOVED} duplicate position(s) from truth VCF"
+    report_removed_duplicates "${TRUTH_PREDEDUP}" "${TRUTH_OVERLAPPED}" "${TRUTH_DUP_REPORT}" "truth"
+    log_info "Duplicate report (truth): ${TRUTH_DUP_REPORT}"
+else
+    echo -e "CHROM\tPOS\tREF\tALT" > "${TRUTH_DUP_REPORT}"
+    log_info "No duplicates removed from truth VCF"
 fi
 
 if [[ "${IMPUTED_OVERLAPPED_N}" -eq 0 || "${TRUTH_OVERLAPPED_N}" -eq 0 ]]; then
