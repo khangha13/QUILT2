@@ -90,10 +90,9 @@ load_gt_table <- function(path) {
 }
 
 variant_key <- function(meta_dt) {
-  # Position-only key: REF/ALT may differ between imputed (reference-genome
-  # alleles) and truth (array TOP-strand alleles). The AT/CG recoding in
-  # wgs_to_array_vcf.py guarantees dosage equivalence regardless of which
-  # physical alleles sit in the REF/ALT columns.
+  # Position-only key. Both VCFs have been translated to A/B format by
+  # dosage_r2.sh, so REF/ALT columns are now "A"/"B" in both files.
+  # Matching on (CHROM, POS) is sufficient.
   paste(meta_dt$CHROM, meta_dt$POS, sep = ":")
 }
 
@@ -130,12 +129,20 @@ gp_to_ds <- function(gp_mat) {
 }
 
 gt_to_dosage <- function(gt_mat) {
+  # Convert A/B genotype strings to numeric dosage.
+  # Input genotypes are in A/B format produced by dosage_r2.sh:
+  #   A/A → 0  (homozygous AT-group / array REF)
+  #   A/B → 1  (heterozygous)
+  #   B/A → 1  (heterozygous, reversed order)
+  #   B/B → 2  (homozygous CG-group / array ALT)
+  #   ./. → NA (missing)
+  # Phased separators (|) are normalized to / before matching.
   flat <- gsub("\\|", "/", gt_mat)
-  parts <- tstrsplit(flat, "/", fixed = TRUE)
-  a1 <- suppressWarnings(as.numeric(parts[[1]]))
-  a2 <- suppressWarnings(as.numeric(parts[[2]]))
-  dosage <- a1 + a2
-  dosage[is.na(a1) | is.na(a2)] <- NA_real_
+  dosage <- rep(NA_real_, length(flat))
+  dosage[flat == "A/A"] <- 0
+  dosage[flat == "A/B" | flat == "B/A"] <- 1
+  dosage[flat == "B/B"] <- 2
+  # Everything else (including "./." and any unexpected strings) stays NA.
   dim(dosage) <- dim(gt_mat)
   dosage
 }
@@ -328,11 +335,19 @@ if (isTRUE(opts$plots)) {
     dev.off()
 
     open_png(sprintf("%s.r2_vs_maf.png", out_prefix))
-    print(ggplot(metrics_dt[!is.na(r2) & !is.na(maf)], aes(x = maf, y = r2)) +
-            geom_hex(bins = 40) +
+    plot_dt <- metrics_dt[!is.na(r2) & !is.na(maf)]
+    p_maf <- ggplot(plot_dt, aes(x = maf, y = r2))
+    # Use geom_hex if hexbin is available, otherwise fall back to geom_bin2d
+    if (requireNamespace("hexbin", quietly = TRUE)) {
+      p_maf <- p_maf + geom_hex(bins = 40)
+    } else {
+      p_maf <- p_maf + geom_bin2d(bins = 40)
+    }
+    p_maf <- p_maf +
             scale_fill_viridis_c(option = "plasma") +
             theme_minimal(base_size = 12) +
-            labs(title = "r2 vs MAF (truth-derived)", x = "Minor allele frequency", y = expression(r^2)))
+            labs(title = "r2 vs MAF (truth-derived)", x = "Minor allele frequency", y = expression(r^2))
+    print(p_maf)
     dev.off()
   }
 }
