@@ -295,6 +295,7 @@ TRUTH_AB_TSV="${OUT_PREFIX}.truth.AB_format.tsv"
 EXCEPTION_REPORT="${OUT_PREFIX}.translation_exceptions.tsv"
 
 METRICS_TSV="${OUT_PREFIX}.metrics.tsv"
+COMMON_SAMPLES_OUT="${OUT_PREFIX}.common_samples.txt"
 
 # Helper: check if a set of files all exist (for skip logic).
 all_exist() {
@@ -305,7 +306,7 @@ all_exist() {
 }
 
 # =============================================================================
-# SAMPLE SET DERIVATION (always runs — cheap and needed by all downstream steps)
+# SAMPLE SET DERIVATION (skip if already exists, unless --force)
 # =============================================================================
 
 SAMPLE_SET="${SAMPLE_FILE}"
@@ -314,6 +315,9 @@ if [[ -n "${SAMPLE_FILE}" ]]; then
         log_error "Sample file not found: ${SAMPLE_FILE}"
         exit 1
     fi
+elif [[ "${FORCE}" == "false" ]] && [[ -f "${COMMON_SAMPLES_OUT}" ]]; then
+    log_info "[SKIP] Common sample set already exists: ${COMMON_SAMPLES_OUT}"
+    SAMPLE_SET="${COMMON_SAMPLES_OUT}"
 else
     log_info "Deriving common sample set from both VCFs"
     bcftools query -l "${IMPUTED_VCF}" | sort > "${TMP_DIR}/imputed.samples"
@@ -323,7 +327,9 @@ else
         log_error "No overlapping samples found between VCFs"
         exit 1
     fi
-    SAMPLE_SET="${TMP_DIR}/common.samples"
+    # Save to persistent output location
+    cp "${TMP_DIR}/common.samples" "${COMMON_SAMPLES_OUT}"
+    SAMPLE_SET="${COMMON_SAMPLES_OUT}"
 fi
 
 SAMPLE_COUNT="$(wc -l < "${SAMPLE_SET}" | tr -d ' ')"
