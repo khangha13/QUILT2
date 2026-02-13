@@ -90,8 +90,8 @@ load_gt_table <- function(path) {
 }
 
 variant_key <- function(meta_dt) {
-  # Position-only key. Both VCFs have been translated to A/B format by
-  # dosage_r2.sh, so REF/ALT columns are now "A"/"B" in both files.
+  # Position-only key. Genotypes have been translated to A/B format by
+  # dosage_r2.sh; REF/ALT columns retain original nucleotides.
   # Matching on (CHROM, POS) is sufficient.
   paste(meta_dt$CHROM, meta_dt$POS, sep = ":")
 }
@@ -349,6 +349,89 @@ if (isTRUE(opts$plots)) {
             labs(title = "r2 vs MAF (truth-derived)", x = "Minor allele frequency", y = expression(r^2))
     print(p_maf)
     dev.off()
+
+    # --- Mean r2 vs MAF line plot (fine bins) ---
+    # Bin variants by MAF in 0.01 increments (0-0.01, 0.01-0.02, ..., 0.49-0.50)
+    # and plot mean r2 per bin as a line. This gives a cleaner view of how
+    # imputation quality varies with allele frequency than the heatmap above.
+    r2_maf_line_dt <- metrics_dt[!is.na(r2) & !is.na(maf)]
+    if (nrow(r2_maf_line_dt) > 0) {
+      maf_bin_width <- 0.01
+      r2_maf_line_dt[, maf_fine_bin := floor(maf / maf_bin_width) * maf_bin_width + maf_bin_width / 2]
+
+      r2_by_maf <- r2_maf_line_dt[, .(
+        mean_r2    = mean(r2, na.rm = TRUE),
+        n_variants = .N
+      ), by = maf_fine_bin]
+      setorder(r2_by_maf, maf_fine_bin)
+
+      open_png(sprintf("%s.r2_vs_maf_line.png", out_prefix))
+      p_maf_line <- ggplot(r2_by_maf, aes(x = maf_fine_bin, y = mean_r2)) +
+        geom_line(color = "#1f77b4", linewidth = 0.7) +
+        geom_point(aes(size = n_variants), color = "#1f77b4", alpha = 0.6) +
+        scale_size_continuous(range = c(0.5, 3), name = "Variants\nper bin") +
+        scale_x_continuous(breaks = seq(0, 0.5, by = 0.05)) +
+        coord_cartesian(ylim = c(0, 1)) +
+        theme_minimal(base_size = 12) +
+        theme(panel.grid.minor = element_blank()) +
+        labs(
+          title = expression(paste("Mean ", r^2, " vs MAF (0.01 bins)")),
+          x = "Minor allele frequency",
+          y = expression(paste("Mean ", r^2))
+        )
+      print(p_maf_line)
+      dev.off()
+
+      # Save the binned data.
+      fwrite(r2_by_maf, sprintf("%s.r2_vs_maf_line.tsv", out_prefix), sep = "\t")
+    }
+
+    # --- Per-chromosome r2 in 1 Mb windows ---
+    # Bin each variant into 1 Mb windows along its chromosome and compute the
+    # mean r2 per bin.  Each chromosome is shown as a separate facet panel.
+    r2_pos_dt <- metrics_dt[!is.na(r2), .(CHROM, POS, r2)]
+    if (nrow(r2_pos_dt) > 0) {
+      bin_size <- 1e6  # 1 Mb
+      r2_pos_dt[, pos_mb := floor(POS / bin_size) * bin_size / 1e6]  # bin start in Mb
+
+      r2_bins <- r2_pos_dt[, .(
+        mean_r2   = mean(r2, na.rm = TRUE),
+        n_variants = .N
+      ), by = .(CHROM, pos_mb)]
+
+      # Sort chromosomes naturally (Chr01, Chr02, ..., Chr17, ...).
+      chr_levels <- unique(r2_bins$CHROM)
+      chr_levels <- chr_levels[order(nchar(chr_levels), chr_levels)]
+      r2_bins[, CHROM := factor(CHROM, levels = chr_levels)]
+
+      # Determine a sensible plot height: more chromosomes -> taller figure.
+      n_chr <- length(chr_levels)
+      plot_height <- max(1200, 300 * n_chr)
+
+      open_png(sprintf("%s.r2_per_chr_1Mb.png", out_prefix),
+               width = 2400, height = plot_height, res = 200)
+      p_chr <- ggplot(r2_bins, aes(x = pos_mb, y = mean_r2)) +
+        geom_line(color = "#1f77b4", linewidth = 0.5) +
+        geom_point(aes(size = n_variants), color = "#1f77b4", alpha = 0.6) +
+        scale_size_continuous(range = c(0.5, 3), name = "Variants\nper bin") +
+        facet_wrap(~ CHROM, ncol = 1, scales = "free_x", strip.position = "right") +
+        theme_minimal(base_size = 11) +
+        theme(
+          strip.text = element_text(size = 9),
+          panel.grid.minor = element_blank()
+        ) +
+        labs(
+          title = expression(paste("Mean ", r^2, " per 1 Mb window by chromosome")),
+          x = "Position (Mb)",
+          y = expression(paste("Mean ", r^2))
+        ) +
+        coord_cartesian(ylim = c(0, 1))
+      print(p_chr)
+      dev.off()
+
+      # Also save the underlying binned data as a TSV.
+      fwrite(r2_bins, sprintf("%s.r2_per_chr_1Mb.tsv", out_prefix), sep = "\t")
+    }
   }
 }
 

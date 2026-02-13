@@ -55,6 +55,7 @@ Options:
   --no-parquet          Skip writing the concordance Parquet file.
   --no-biallelic-only   Do not restrict to biallelic SNPs (default: restrict).
   --no-plots            Skip plotting; only produce metric TSVs.
+  --force               Re-run all steps even if output files already exist.
   --keep-temp           Do not delete the temporary working directory.
   --help                Show this message and exit.
 
@@ -80,6 +81,12 @@ Processing Steps:
            0/0 → A/A | 0/1 → A/B | 1/1 → B/B
   5. A/B dosages (A/A=0, A/B=1, B/B=2) are compared to compute r² and concordance.
 
+Skip Checks:
+  Each step checks whether its output files already exist. If they do, the step
+  is skipped with a [SKIP] log message. Use --force to re-run all steps regardless.
+  Checkpoints: overlapped VCFs (Steps 1-3), unambiguous VCFs (Step 4),
+  A/B TSVs (Step 5), metrics.tsv (Step 6).
+
 Outputs (PREFIX.*):
   IMPUTED_overlapped_only.vcf.gz              Imputed VCF at common positions (deduped)
   TRUTH_overlapped_only.vcf.gz                Truth VCF at common positions (deduped)
@@ -98,6 +105,10 @@ Outputs (PREFIX.*):
   r2_hist.png                                 Distribution of r² (if plots enabled)
   concordance_hist.png                        Distribution of concordance (if plots enabled)
   r2_vs_maf.png                               r² vs MAF heatmap (if plots enabled)
+  r2_vs_maf_line.png                          Mean r² vs MAF line plot (0.01 bins)
+  r2_vs_maf_line.tsv                          Underlying binned data for the MAF line plot
+  r2_per_chr_1Mb.png                          Mean r² per 1 Mb window, faceted by chromosome
+  r2_per_chr_1Mb.tsv                          Underlying binned data for the per-chr plot
 EOF
 }
 
@@ -115,6 +126,7 @@ RUN_PLOTS=true
 KEEP_TEMP=false
 USE_VCFPP=false
 WRITE_PARQUET=true
+FORCE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -127,6 +139,7 @@ while [[ $# -gt 0 ]]; do
         --no-parquet)     WRITE_PARQUET=false; shift ;;
         --no-biallelic-only) BIALLELIC_ONLY=false; shift ;;
         --no-plots)       RUN_PLOTS=false; shift ;;
+        --force)          FORCE=true; shift ;;
         --keep-temp)      KEEP_TEMP=true; shift ;;
         --help|-h)        usage; exit 0 ;;
         *)
@@ -263,13 +276,70 @@ maybe_index "${IMPUTED_VCF}"
 maybe_index "${TRUTH_VCF}"
 
 # =============================================================================
-# STEP 1: CONTIG NAME DETECTION AND NORMALIZATION
+# OUTPUT FILE PATHS (defined once, used for skip-checks and saving)
 # =============================================================================
-# The canonical contig style for this pipeline is ChrNN (e.g., Chr01, Chr02).
-# Both VCFs are inspected: if a VCF uses a different convention (e.g., "chr1",
-# "1"), its contigs are renamed to ChrNN using bcftools annotate --rename-chrs.
-# This ensures position-level matching works even if the two VCFs use different
-# naming schemes.
+
+IMPUTED_OVERLAP_OUT="${OUT_PREFIX}.IMPUTED_overlapped_only.vcf.gz"
+TRUTH_OVERLAP_OUT="${OUT_PREFIX}.TRUTH_overlapped_only.vcf.gz"
+IMPUTED_DUP_REPORT="${OUT_PREFIX}.duplicates_removed.imputed.tsv"
+TRUTH_DUP_REPORT="${OUT_PREFIX}.duplicates_removed.truth.tsv"
+
+IMPUTED_UNAMBIG_OUT="${OUT_PREFIX}.IMPUTED_overlapped_unambiguous_only.vcf.gz"
+TRUTH_UNAMBIG_OUT="${OUT_PREFIX}.TRUTH_overlapped_unambiguous_only.vcf.gz"
+AMBIG_REPORT="${OUT_PREFIX}.ambiguous_loci_removed.tsv"
+
+IMPUTED_AB_TSV="${OUT_PREFIX}.imputed.AB_format.tsv"
+TRUTH_AB_TSV="${OUT_PREFIX}.truth.AB_format.tsv"
+EXCEPTION_REPORT="${OUT_PREFIX}.translation_exceptions.tsv"
+
+METRICS_TSV="${OUT_PREFIX}.metrics.tsv"
+
+# Helper: check if a set of files all exist (for skip logic).
+all_exist() {
+    for f in "$@"; do
+        [[ -f "$f" ]] || return 1
+    done
+    return 0
+}
+
+# =============================================================================
+# SAMPLE SET DERIVATION (always runs — cheap and needed by all downstream steps)
+# =============================================================================
+
+SAMPLE_SET="${SAMPLE_FILE}"
+if [[ -n "${SAMPLE_FILE}" ]]; then
+    if [[ ! -f "${SAMPLE_FILE}" ]]; then
+        log_error "Sample file not found: ${SAMPLE_FILE}"
+        exit 1
+    fi
+else
+    log_info "Deriving common sample set from both VCFs"
+    bcftools query -l "${IMPUTED_VCF}" | sort > "${TMP_DIR}/imputed.samples"
+    bcftools query -l "${TRUTH_VCF}"   | sort > "${TMP_DIR}/truth.samples"
+    comm -12 "${TMP_DIR}/imputed.samples" "${TMP_DIR}/truth.samples" > "${TMP_DIR}/common.samples"
+    if [[ ! -s "${TMP_DIR}/common.samples" ]]; then
+        log_error "No overlapping samples found between VCFs"
+        exit 1
+    fi
+    SAMPLE_SET="${TMP_DIR}/common.samples"
+fi
+
+SAMPLE_COUNT="$(wc -l < "${SAMPLE_SET}" | tr -d ' ')"
+log_info "Evaluating ${SAMPLE_COUNT} samples"
+
+REGION_ARGS=()
+if [[ -n "${REGION}" ]]; then
+    REGION_ARGS=( -r "${REGION}" )
+fi
+
+BIALLELIC_ARGS=()
+if [[ "${BIALLELIC_ONLY}" == "true" ]]; then
+    BIALLELIC_ARGS=( -m2 -M2 -v snps )
+fi
+
+# =============================================================================
+# HELPER FUNCTIONS (contig normalization, duplicate reporting)
+# =============================================================================
 
 detect_contig_style() {
     # Determine the contig naming convention used in a VCF.
@@ -349,6 +419,34 @@ normalize_contigs() {
     run_cmd bcftools index -f -c "${output_vcf}"
 }
 
+report_removed_duplicates() {
+    # Compare pre-dedup vs post-dedup variant lists and write a report of removed rows.
+    # $1 = pre-dedup VCF, $2 = post-dedup VCF, $3 = output report, $4 = label
+    local prededup_vcf="$1" deduped_vcf="$2" report="$3" label="$4"
+    local pre_list="${TMP_DIR}/${label}.prededup.variants.txt"
+    local post_list="${TMP_DIR}/${label}.deduped.variants.txt"
+
+    bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${prededup_vcf}" | sort > "${pre_list}"
+    bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${deduped_vcf}"  | sort > "${post_list}"
+
+    {
+        echo -e "CHROM\tPOS\tREF\tALT"
+        comm -23 "${pre_list}" "${post_list}"
+    } > "${report}"
+}
+
+# =============================================================================
+# STEPS 1-3: CONTIG NORMALIZATION → POSITION INTERSECTION → DEDUP
+# =============================================================================
+# Skip if overlapped VCFs already exist from a previous run (use --force to redo).
+
+if [[ "${FORCE}" == "false" ]] && all_exist "${IMPUTED_OVERLAP_OUT}" "${TRUTH_OVERLAP_OUT}"; then
+    log_info "[SKIP] Steps 1-3: Overlapped VCFs already exist"
+    log_info "  ${IMPUTED_OVERLAP_OUT}"
+    log_info "  ${TRUTH_OVERLAP_OUT}"
+else
+
+# --- Step 1: Contig normalization ---
 log_info "Detecting contig naming conventions"
 IMPUTED_CONTIG_STYLE="$(detect_contig_style "${IMPUTED_VCF}")"
 TRUTH_CONTIG_STYLE="$(detect_contig_style "${TRUTH_VCF}")"
@@ -357,7 +455,6 @@ log_info "Truth VCF contig style: ${TRUTH_CONTIG_STYLE}"
 
 CANONICAL_STYLE="ChrNN"
 
-# Normalize imputed VCF contigs if needed.
 IMPUTED_NORMALIZED="${IMPUTED_VCF}"
 if [[ "${IMPUTED_CONTIG_STYLE}" != "${CANONICAL_STYLE}" ]]; then
     log_warn "Imputed VCF uses '${IMPUTED_CONTIG_STYLE}' contigs. Normalizing to '${CANONICAL_STYLE}'."
@@ -373,7 +470,6 @@ if [[ "${IMPUTED_CONTIG_STYLE}" != "${CANONICAL_STYLE}" ]]; then
     fi
 fi
 
-# Normalize truth VCF contigs if needed.
 TRUTH_NORMALIZED="${TRUTH_VCF}"
 if [[ "${TRUTH_CONTIG_STYLE}" != "${CANONICAL_STYLE}" ]]; then
     log_warn "Truth VCF uses '${TRUTH_CONTIG_STYLE}' contigs. Normalizing to '${CANONICAL_STYLE}'."
@@ -389,14 +485,7 @@ if [[ "${TRUTH_CONTIG_STYLE}" != "${CANONICAL_STYLE}" ]]; then
     fi
 fi
 
-# =============================================================================
-# STEP 2: POSITION-ONLY INTERSECTION
-# =============================================================================
-# Extract unique (CHROM, POS) from each VCF and find the overlap using comm.
-# NOTE: A future optimization could use `bcftools isec -n=2 -c all` for
-# position-only matching, which may be faster on very large files. The current
-# manual approach is retained for explicit control and detailed logging.
-
+# --- Step 2: Position-only intersection ---
 log_info "Extracting positions from each VCF (position-only intersection)"
 IMPUTED_POS="${TMP_DIR}/imputed.pos.txt"
 TRUTH_POS="${TMP_DIR}/truth.pos.txt"
@@ -422,55 +511,10 @@ if [[ "${COMMON_POS_COUNT}" -eq 0 ]]; then
     exit 1
 fi
 
-# Convert to targets format (CHROM<TAB>POS) for bcftools -T.
 SITE_LIST="${TMP_DIR}/sites.tsv"
 awk -F'\t' 'BEGIN{OFS="\t"} {print $1, $2}' "${COMMON_POS}" > "${SITE_LIST}"
 
-# =============================================================================
-# SAMPLE SET DERIVATION
-# =============================================================================
-# Use the user-supplied sample file, or derive the intersection of samples
-# present in both VCFs.
-
-SAMPLE_SET="${SAMPLE_FILE}"
-if [[ -n "${SAMPLE_FILE}" ]]; then
-    if [[ ! -f "${SAMPLE_FILE}" ]]; then
-        log_error "Sample file not found: ${SAMPLE_FILE}"
-        exit 1
-    fi
-else
-    log_info "Deriving common sample set from both VCFs"
-    bcftools query -l "${IMPUTED_VCF}" | sort > "${TMP_DIR}/imputed.samples"
-    bcftools query -l "${TRUTH_VCF}"   | sort > "${TMP_DIR}/truth.samples"
-    comm -12 "${TMP_DIR}/imputed.samples" "${TMP_DIR}/truth.samples" > "${TMP_DIR}/common.samples"
-    if [[ ! -s "${TMP_DIR}/common.samples" ]]; then
-        log_error "No overlapping samples found between VCFs"
-        exit 1
-    fi
-    SAMPLE_SET="${TMP_DIR}/common.samples"
-fi
-
-SAMPLE_COUNT="$(wc -l < "${SAMPLE_SET}" | tr -d ' ')"
-log_info "Evaluating ${SAMPLE_COUNT} samples"
-
-REGION_ARGS=()
-if [[ -n "${REGION}" ]]; then
-    REGION_ARGS=( -r "${REGION}" )
-fi
-
-BIALLELIC_ARGS=()
-if [[ "${BIALLELIC_ONLY}" == "true" ]]; then
-    BIALLELIC_ARGS=( -m2 -M2 -v snps )
-fi
-
-# =============================================================================
-# STEP 3: FILTER TO COMMON POSITIONS + DEDUPLICATE
-# =============================================================================
-# Filter both VCFs to overlapping positions using -T (targets) for exact
-# position matching, then deduplicate with `bcftools norm -d snps` to remove
-# multi-allelic sites that were decomposed into multiple biallelic rows at the
-# same position (e.g., pos 1000: A→G and A→T as separate records).
-
+# --- Step 3: Filter to common positions + deduplicate ---
 log_info "Filtering VCFs to ${COMMON_POS_COUNT} common positions"
 
 IMPUTED_PREDEDUP="${TMP_DIR}/imputed.prededup.vcf.gz"
@@ -486,7 +530,6 @@ run_cmd bcftools index -f -c "${TRUTH_PREDEDUP}"
 IMPUTED_PREDEDUP_N="$(bcftools view -H "${IMPUTED_PREDEDUP}" | wc -l | tr -d ' ')"
 TRUTH_PREDEDUP_N="$(bcftools view -H "${TRUTH_PREDEDUP}" | wc -l | tr -d ' ')"
 
-# Deduplicate: keep one SNP per position.
 IMPUTED_OVERLAPPED="${TMP_DIR}/imputed.overlapped.vcf.gz"
 TRUTH_OVERLAPPED="${TMP_DIR}/truth.overlapped.vcf.gz"
 
@@ -500,37 +543,13 @@ IMPUTED_OVERLAPPED_N="$(bcftools view -H "${IMPUTED_OVERLAPPED}" | wc -l | tr -d
 TRUTH_OVERLAPPED_N="$(bcftools view -H "${TRUTH_OVERLAPPED}" | wc -l | tr -d ' ')"
 log_info "Variants after dedup: imputed=${IMPUTED_OVERLAPPED_N}, truth=${TRUTH_OVERLAPPED_N}"
 
-# --- Record which positions were removed as duplicates ---
-# Compare pre-dedup vs post-dedup variant lists. Any (CHROM, POS, REF, ALT)
-# present in the pre-dedup file but absent from the post-dedup file was a
-# duplicate that got dropped by `bcftools norm -d snps`.
-
-IMPUTED_DUP_REPORT="${OUT_PREFIX}.duplicates_removed.imputed.tsv"
-TRUTH_DUP_REPORT="${OUT_PREFIX}.duplicates_removed.truth.tsv"
-
-report_removed_duplicates() {
-    # $1 = pre-dedup VCF, $2 = post-dedup VCF, $3 = output report, $4 = label
-    local prededup_vcf="$1" deduped_vcf="$2" report="$3" label="$4"
-    local pre_list="${TMP_DIR}/${label}.prededup.variants.txt"
-    local post_list="${TMP_DIR}/${label}.deduped.variants.txt"
-
-    bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${prededup_vcf}" | sort > "${pre_list}"
-    bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${deduped_vcf}"  | sort > "${post_list}"
-
-    # Lines in pre but not in post = removed duplicates.
-    {
-        echo -e "CHROM\tPOS\tREF\tALT"
-        comm -23 "${pre_list}" "${post_list}"
-    } > "${report}"
-}
-
+# Record which positions were removed as duplicates.
 if [[ "${IMPUTED_PREDEDUP_N}" -ne "${IMPUTED_OVERLAPPED_N}" ]]; then
     IMPUTED_DUP_REMOVED=$((IMPUTED_PREDEDUP_N - IMPUTED_OVERLAPPED_N))
     log_warn "Removed ${IMPUTED_DUP_REMOVED} duplicate position(s) from imputed VCF"
     report_removed_duplicates "${IMPUTED_PREDEDUP}" "${IMPUTED_OVERLAPPED}" "${IMPUTED_DUP_REPORT}" "imputed"
     log_info "Duplicate report (imputed): ${IMPUTED_DUP_REPORT}"
 else
-    # Write header-only file to keep output set consistent.
     echo -e "CHROM\tPOS\tREF\tALT" > "${IMPUTED_DUP_REPORT}"
     log_info "No duplicates removed from imputed VCF"
 fi
@@ -550,10 +569,7 @@ if [[ "${IMPUTED_OVERLAPPED_N}" -eq 0 || "${TRUTH_OVERLAPPED_N}" -eq 0 ]]; then
     exit 1
 fi
 
-# Save overlapped-only VCFs to output prefix for inspection / reuse.
-IMPUTED_OVERLAP_OUT="${OUT_PREFIX}.IMPUTED_overlapped_only.vcf.gz"
-TRUTH_OVERLAP_OUT="${OUT_PREFIX}.TRUTH_overlapped_only.vcf.gz"
-
+# Save overlapped-only VCFs to output prefix for reuse.
 log_info "Saving overlapped VCFs"
 cp "${IMPUTED_OVERLAPPED}" "${IMPUTED_OVERLAP_OUT}"
 cp "${IMPUTED_OVERLAPPED}.csi" "${IMPUTED_OVERLAP_OUT}.csi" 2>/dev/null || bcftools index -f -c "${IMPUTED_OVERLAP_OUT}"
@@ -562,9 +578,19 @@ cp "${TRUTH_OVERLAPPED}.csi" "${TRUTH_OVERLAP_OUT}.csi" 2>/dev/null || bcftools 
 log_info "Saved: ${IMPUTED_OVERLAP_OUT}"
 log_info "Saved: ${TRUTH_OVERLAP_OUT}"
 
+fi  # end Steps 1-3 skip-check
+
 # =============================================================================
 # STEP 4: REMOVE STRAND-AMBIGUOUS LOCI
 # =============================================================================
+# Skip if unambiguous VCFs already exist from a previous run.
+
+if [[ "${FORCE}" == "false" ]] && all_exist "${IMPUTED_UNAMBIG_OUT}" "${TRUTH_UNAMBIG_OUT}"; then
+    log_info "[SKIP] Step 4: Unambiguous VCFs already exist"
+    log_info "  ${IMPUTED_UNAMBIG_OUT}"
+    log_info "  ${TRUTH_UNAMBIG_OUT}"
+else
+
 # Strand-ambiguous SNPs have REF/ALT that are complementary pairs:
 #   A/T, T/A  (A and T are complements)
 #   C/G, G/C  (C and G are complements)
@@ -574,10 +600,8 @@ log_info "Saved: ${TRUTH_OVERLAP_OUT}"
 
 log_info "Identifying strand-ambiguous loci in imputed VCF"
 
-# Extract all variants from the imputed overlapped VCF and flag ambiguous ones.
-# Ambiguous = REF/ALT is one of: A/T, T/A, C/G, G/C.
 AMBIGUOUS_LOCI="${TMP_DIR}/ambiguous_loci.tsv"
-bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${IMPUTED_OVERLAPPED}" \
+bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${IMPUTED_OVERLAP_OUT}" \
     | awk -F'\t' 'BEGIN{OFS="\t"}
         ($3=="A" && $4=="T") || ($3=="T" && $4=="A") ||
         ($3=="C" && $4=="G") || ($3=="G" && $4=="C") {print}
@@ -586,36 +610,29 @@ bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${IMPUTED_OVERLAPPED}" \
 AMBIG_COUNT="$(wc -l < "${AMBIGUOUS_LOCI}" | tr -d ' ')"
 log_info "Found ${AMBIG_COUNT} strand-ambiguous position(s) to remove"
 
-# Write the report to the output prefix (always, even if 0 rows).
-AMBIG_REPORT="${OUT_PREFIX}.ambiguous_loci_removed.tsv"
 {
     echo -e "CHROM\tPOS\tREF\tALT"
     cat "${AMBIGUOUS_LOCI}"
 } > "${AMBIG_REPORT}"
 log_info "Ambiguous loci report: ${AMBIG_REPORT}"
 
-# Build a targets exclusion file (CHROM<TAB>POS) for bcftools -T ^file.
 AMBIG_POSITIONS="${TMP_DIR}/ambiguous_positions.tsv"
 awk -F'\t' 'BEGIN{OFS="\t"} {print $1, $2}' "${AMBIGUOUS_LOCI}" > "${AMBIG_POSITIONS}"
 
-# Filter both VCFs: exclude ambiguous positions.
-IMPUTED_UNAMBIG="${TMP_DIR}/imputed.unambiguous.vcf.gz"
-TRUTH_UNAMBIG="${TMP_DIR}/truth.unambiguous.vcf.gz"
-
 if [[ "${AMBIG_COUNT}" -gt 0 ]]; then
     log_info "Removing ${AMBIG_COUNT} ambiguous loci from both VCFs"
-    run_cmd bcftools view -T ^"${AMBIG_POSITIONS}" "${IMPUTED_OVERLAPPED}" -Oz -o "${IMPUTED_UNAMBIG}"
-    run_cmd bcftools view -T ^"${AMBIG_POSITIONS}" "${TRUTH_OVERLAPPED}"   -Oz -o "${TRUTH_UNAMBIG}"
+    run_cmd bcftools view -T ^"${AMBIG_POSITIONS}" "${IMPUTED_OVERLAP_OUT}" -Oz -o "${IMPUTED_UNAMBIG_OUT}"
+    run_cmd bcftools view -T ^"${AMBIG_POSITIONS}" "${TRUTH_OVERLAP_OUT}"   -Oz -o "${TRUTH_UNAMBIG_OUT}"
 else
     log_info "No ambiguous loci to remove; copying overlapped VCFs as-is"
-    cp "${IMPUTED_OVERLAPPED}" "${IMPUTED_UNAMBIG}"
-    cp "${TRUTH_OVERLAPPED}"   "${TRUTH_UNAMBIG}"
+    cp "${IMPUTED_OVERLAP_OUT}" "${IMPUTED_UNAMBIG_OUT}"
+    cp "${TRUTH_OVERLAP_OUT}"   "${TRUTH_UNAMBIG_OUT}"
 fi
-run_cmd bcftools index -f -c "${IMPUTED_UNAMBIG}"
-run_cmd bcftools index -f -c "${TRUTH_UNAMBIG}"
+run_cmd bcftools index -f -c "${IMPUTED_UNAMBIG_OUT}"
+run_cmd bcftools index -f -c "${TRUTH_UNAMBIG_OUT}"
 
-IMPUTED_UNAMBIG_N="$(bcftools view -H "${IMPUTED_UNAMBIG}" | wc -l | tr -d ' ')"
-TRUTH_UNAMBIG_N="$(bcftools view -H "${TRUTH_UNAMBIG}" | wc -l | tr -d ' ')"
+IMPUTED_UNAMBIG_N="$(bcftools view -H "${IMPUTED_UNAMBIG_OUT}" | wc -l | tr -d ' ')"
+TRUTH_UNAMBIG_N="$(bcftools view -H "${TRUTH_UNAMBIG_OUT}" | wc -l | tr -d ' ')"
 log_info "Variants after ambiguous removal: imputed=${IMPUTED_UNAMBIG_N}, truth=${TRUTH_UNAMBIG_N}"
 
 if [[ "${IMPUTED_UNAMBIG_N}" -eq 0 || "${TRUTH_UNAMBIG_N}" -eq 0 ]]; then
@@ -623,21 +640,22 @@ if [[ "${IMPUTED_UNAMBIG_N}" -eq 0 || "${TRUTH_UNAMBIG_N}" -eq 0 ]]; then
     exit 1
 fi
 
-# Save unambiguous VCFs to output prefix.
-IMPUTED_UNAMBIG_OUT="${OUT_PREFIX}.IMPUTED_overlapped_unambiguous_only.vcf.gz"
-TRUTH_UNAMBIG_OUT="${OUT_PREFIX}.TRUTH_overlapped_unambiguous_only.vcf.gz"
-
-log_info "Saving unambiguous VCFs"
-cp "${IMPUTED_UNAMBIG}" "${IMPUTED_UNAMBIG_OUT}"
-cp "${IMPUTED_UNAMBIG}.csi" "${IMPUTED_UNAMBIG_OUT}.csi" 2>/dev/null || bcftools index -f -c "${IMPUTED_UNAMBIG_OUT}"
-cp "${TRUTH_UNAMBIG}" "${TRUTH_UNAMBIG_OUT}"
-cp "${TRUTH_UNAMBIG}.csi" "${TRUTH_UNAMBIG_OUT}.csi" 2>/dev/null || bcftools index -f -c "${TRUTH_UNAMBIG_OUT}"
 log_info "Saved: ${IMPUTED_UNAMBIG_OUT}"
 log_info "Saved: ${TRUTH_UNAMBIG_OUT}"
+
+fi  # end Step 4 skip-check
 
 # =============================================================================
 # STEP 5: TRANSLATE BOTH VCFs TO A/B FORMAT
 # =============================================================================
+# Skip if A/B format TSVs already exist from a previous run.
+
+if [[ "${FORCE}" == "false" ]] && all_exist "${IMPUTED_AB_TSV}" "${TRUTH_AB_TSV}"; then
+    log_info "[SKIP] Step 5: A/B format TSVs already exist"
+    log_info "  ${IMPUTED_AB_TSV}"
+    log_info "  ${TRUTH_AB_TSV}"
+else
+
 # Both VCFs are converted to a common A/B genotype representation:
 #
 # --- IMPUTED VCF (nucleotide-based translation) ---
@@ -678,57 +696,36 @@ for s in "${SAMPLE_ORDER[@]}"; do
 done
 
 # --- Imputed A/B translation ---
-# The awk script receives `bcftools query` output with columns:
-#   $1=CHROM  $2=POS  $3=REF  $4=ALT  $5=ID  $6..=GT per sample
-# For each GT field, it decodes allele indices to nucleotides, classifies them,
-# and outputs the A/B genotype. Exceptions (unexpected genotypes) are written
-# to a separate file via a redirect.
-
 log_info "Translating imputed VCF to A/B format"
-IMPUTED_AB_TSV="${OUT_PREFIX}.imputed.AB_format.tsv"
 IMPUTED_EXCEPTIONS="${TMP_DIR}/imputed_exceptions.tsv"
 
 {
     echo -e "${HEADER}"
     bcftools query -f "%CHROM\t%POS\t%REF\t%ALT\t%ID[\t%GT]\n" \
-        -S "${SAMPLE_SET}" "${IMPUTED_UNAMBIG}"
+        -S "${SAMPLE_SET}" "${IMPUTED_UNAMBIG_OUT}"
 } | awk -F'\t' -v exc_file="${IMPUTED_EXCEPTIONS}" '
 BEGIN { OFS = "\t" }
 
-# Helper: classify a nucleotide into AT (="A") or CG (="B"), or "?" if unknown.
 function nuc_group(base) {
     if (base == "A" || base == "T") return "A"
     if (base == "C" || base == "G") return "B"
     return "?"
 }
 
-# Pass the header line through, replacing REF/ALT with A/B.
-NR == 1 {
-    $3 = "REF"; $4 = "ALT"   # keep column names as-is for clarity
-    print
-    next
-}
+NR == 1 { print; next }
 
-# Data lines.
 {
-    ref = $3   # REF nucleotide
-    alt = $4   # ALT nucleotide
+    ref = $3
+    alt = $4
 
-    # Replace REF/ALT columns with A and B to reflect the new coding.
-    $3 = "A"
-    $4 = "B"
-
-    # Translate each sample GT (columns 6 onward).
     for (i = 6; i <= NF; i++) {
         gt = $i
 
-        # Handle missing genotypes.
         if (gt == "./." || gt == ".|.") {
             $i = "./."
             continue
         }
 
-        # Split GT on / or | to get the two allele indices.
         sep = "/"
         n = split(gt, idx, "/")
         if (n != 2) {
@@ -736,14 +733,11 @@ NR == 1 {
             sep = "|"
         }
         if (n != 2) {
-            # Unexpected GT format — record as exception.
             print $1, $2, ref, alt, "sample_col=" i, gt >> exc_file
             $i = "./."
             continue
         }
 
-        # Decode allele indices to actual nucleotides.
-        # Index 0 = REF, index 1 = ALT. Anything else is unexpected.
         nuc1 = ""
         nuc2 = ""
         if      (idx[1] == "0") nuc1 = ref
@@ -756,18 +750,16 @@ NR == 1 {
         else if (idx[2] == ".") { $i = "./."; continue }
         else { print $1, $2, ref, alt, "sample_col=" i, gt >> exc_file; $i = "./."; continue }
 
-        # Classify each nucleotide into group A (AT) or B (CG).
         g1 = nuc_group(nuc1)
         g2 = nuc_group(nuc2)
 
         if (g1 == "?" || g2 == "?") {
-            # Non-ACGT nucleotide — exception.
             print $1, $2, ref, alt, "sample_col=" i, gt, nuc1, nuc2 >> exc_file
             $i = "./."
             continue
         }
 
-        $i = g1 sep g2   # e.g., "A/B", "B/A", "A/A", "B/B"
+        $i = g1 sep g2
     }
 
     print
@@ -778,48 +770,31 @@ IMPUTED_AB_N="$(( $(wc -l < "${IMPUTED_AB_TSV}" | tr -d ' ') - 1 ))"
 log_info "Imputed A/B format: ${IMPUTED_AB_N} variants written to ${IMPUTED_AB_TSV}"
 
 # --- Truth A/B translation ---
-# Simple index-based mapping: 0/0→A/A, 0/1→A/B, 1/0→A/B, 1/1→B/B, ./.→./.
-# Any other GT string is recorded as an exception.
-
 log_info "Translating truth VCF to A/B format"
-TRUTH_AB_TSV="${OUT_PREFIX}.truth.AB_format.tsv"
 TRUTH_EXCEPTIONS="${TMP_DIR}/truth_exceptions.tsv"
 
 {
     echo -e "${HEADER}"
     bcftools query -f "%CHROM\t%POS\t%REF\t%ALT\t%ID[\t%GT]\n" \
-        -S "${SAMPLE_SET}" "${TRUTH_UNAMBIG}"
+        -S "${SAMPLE_SET}" "${TRUTH_UNAMBIG_OUT}"
 } | awk -F'\t' -v exc_file="${TRUTH_EXCEPTIONS}" '
 BEGIN { OFS = "\t" }
 
-# Pass the header line through, replacing REF/ALT with A/B.
-NR == 1 {
-    $3 = "REF"; $4 = "ALT"
-    print
-    next
-}
+NR == 1 { print; next }
 
-# Data lines.
 {
     ref_orig = $3
     alt_orig = $4
 
-    # Replace REF/ALT columns with A and B.
-    $3 = "A"
-    $4 = "B"
-
-    # Translate each sample GT (columns 6 onward).
     for (i = 6; i <= NF; i++) {
         gt = $i
 
-        # Standard mappings.
         if      (gt == "0/0" || gt == "0|0") $i = "A/A"
         else if (gt == "0/1" || gt == "0|1") $i = "A/B"
         else if (gt == "1/0" || gt == "1|0") $i = "A/B"
         else if (gt == "1/1" || gt == "1|1") $i = "B/B"
         else if (gt == "./." || gt == ".|.") $i = "./."
         else {
-            # Unexpected GT — record as exception.
             print $1, $2, ref_orig, alt_orig, "sample_col=" i, gt >> exc_file
             $i = "./."
         }
@@ -833,11 +808,7 @@ TRUTH_AB_N="$(( $(wc -l < "${TRUTH_AB_TSV}" | tr -d ' ') - 1 ))"
 log_info "Truth A/B format: ${TRUTH_AB_N} variants written to ${TRUTH_AB_TSV}"
 
 # --- Exception reporting ---
-# Merge any exceptions from imputed and truth translations into a single report.
-# Only created if exceptions exist.
-EXCEPTION_REPORT="${OUT_PREFIX}.translation_exceptions.tsv"
 EXCEPTION_COUNT=0
-
 if [[ -s "${IMPUTED_EXCEPTIONS}" || -s "${TRUTH_EXCEPTIONS}" ]]; then
     {
         echo -e "SOURCE\tCHROM\tPOS\tREF\tALT\tCONTEXT\tGT\tEXTRA"
@@ -855,9 +826,18 @@ else
     log_info "No translation exceptions found"
 fi
 
+fi  # end Step 5 skip-check
+
 # =============================================================================
 # STEP 6: COMPUTE METRICS VIA R
 # =============================================================================
+# Skip if metrics TSV already exists from a previous run.
+
+if [[ "${FORCE}" == "false" ]] && all_exist "${METRICS_TSV}"; then
+    log_info "[SKIP] Step 6: Metrics already exist"
+    log_info "  ${METRICS_TSV}"
+else
+
 # Feed the A/B format TSVs to the R helper script which:
 #   - Converts A/B genotypes to dosages (A/A=0, A/B=1, B/B=2)
 #   - Computes per-variant r², concordance, and MAF
@@ -881,8 +861,8 @@ R_ARGS=(
 
 if [[ "${USE_VCFPP}" == "true" ]]; then
     R_ARGS+=( "--use-vcfpp"
-              "--vcfpp-imputed" "${IMPUTED_UNAMBIG}"
-              "--vcfpp-truth"   "${TRUTH_UNAMBIG}" )
+              "--vcfpp-imputed" "${IMPUTED_UNAMBIG_OUT}"
+              "--vcfpp-truth"   "${TRUTH_UNAMBIG_OUT}" )
 fi
 
 if [[ "${RUN_PLOTS}" == "true" ]]; then
@@ -891,5 +871,7 @@ fi
 
 log_info "Running R metrics helper"
 run_cmd Rscript "${R_ARGS[@]}"
+
+fi  # end Step 6 skip-check
 
 log_info "Dosage r² and concordance metrics written to ${OUT_PREFIX}.*"
