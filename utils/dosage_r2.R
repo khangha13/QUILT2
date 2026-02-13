@@ -305,10 +305,58 @@ maf_bins_dt <- metrics_dt[!is.na(maf_bin), .(
   concordance_mean = mean(concordance, na.rm = TRUE)
 ), by = maf_bin]
 
+# --- Per-sample metrics ---
+# For each sample, compute overall r² across all variants, plus r² within each
+# 0.1 MAF bin. This helps identify individual samples that may be pulling the
+# dataset r² down, and whether the issue is concentrated in specific MAF ranges.
+
+calc_sample_r2 <- function(ds_col, truth_col) {
+  keep <- !(is.na(ds_col) | is.na(truth_col))
+  n_nonmiss <- sum(keep)
+  if (n_nonmiss < 2) return(list(r2 = NA_real_, n = n_nonmiss))
+  r2 <- suppressWarnings(cor(ds_col[keep], truth_col[keep])^2)
+  list(r2 = r2, n = n_nonmiss)
+}
+
+# MAF bins for per-sample breakdown: 0.0-0.1, 0.1-0.2, ..., 0.4-0.5
+sample_maf_breaks <- seq(0, 0.5, by = 0.1)
+# Assign each variant to a 0.1 MAF bin (using truth-derived MAF from metrics_dt).
+variant_maf <- metrics_dt$maf
+variant_maf_bin <- cut(variant_maf, breaks = sample_maf_breaks,
+                       include.lowest = TRUE, right = FALSE)
+maf_bin_labels <- levels(variant_maf_bin)
+
+sample_metrics_list <- vector("list", length(sample_order))
+for (j in seq_along(sample_order)) {
+  # Overall r².
+  res <- calc_sample_r2(ds_mat[, j], truth_dosage[, j])
+  row <- data.table(sample = sample_order[j],
+                    r2_overall = res$r2,
+                    n_variants = res$n)
+
+  # r² per 0.1 MAF bin.
+  for (b in maf_bin_labels) {
+    idx <- which(variant_maf_bin == b)
+    if (length(idx) >= 2) {
+      bres <- calc_sample_r2(ds_mat[idx, j], truth_dosage[idx, j])
+      set(row, j = paste0("r2_maf_", b), value = bres$r2)
+      set(row, j = paste0("n_maf_", b),  value = bres$n)
+    } else {
+      set(row, j = paste0("r2_maf_", b), value = NA_real_)
+      set(row, j = paste0("n_maf_", b),  value = length(idx))
+    }
+  }
+
+  sample_metrics_list[[j]] <- row
+}
+sample_metrics_dt <- rbindlist(sample_metrics_list)
+setorder(sample_metrics_dt, r2_overall)  # worst samples first
+
 out_prefix <- opts$out_prefix
 fwrite(metrics_dt, sprintf("%s.metrics.tsv", out_prefix), sep = "\t")
 fwrite(summary_dt, sprintf("%s.summary.tsv", out_prefix), sep = "\t", col.names = TRUE)
 fwrite(maf_bins_dt, sprintf("%s.maf_bins.tsv", out_prefix), sep = "\t")
+fwrite(sample_metrics_dt, sprintf("%s.per_sample_metrics.tsv", out_prefix), sep = "\t")
 
 if (isTRUE(opts$write_parquet)) {
   write_concordance_parquet(variant_meta, ds_mat, truth_dosage, sample_order, out_prefix)
@@ -431,6 +479,42 @@ if (isTRUE(opts$plots)) {
 
       # Also save the underlying binned data as a TSV.
       fwrite(r2_bins, sprintf("%s.r2_per_chr_1Mb.tsv", out_prefix), sep = "\t")
+    }
+
+    # --- Per-sample r2 bar plot ---
+    # Bar chart of overall r² per sample, sorted ascending so the worst samples
+    # are on the left. A horizontal dashed line shows the overall mean.
+    samp_plot_dt <- sample_metrics_dt[!is.na(r2_overall)]
+    if (nrow(samp_plot_dt) > 0) {
+      samp_plot_dt[, sample := factor(sample, levels = sample)]  # already sorted by r2_overall
+      overall_mean_r2 <- mean(samp_plot_dt$r2_overall, na.rm = TRUE)
+
+      n_samp <- nrow(samp_plot_dt)
+      bar_width  <- max(1600, 40 * n_samp)
+      bar_height <- 1200
+
+      open_png(sprintf("%s.r2_per_sample.png", out_prefix),
+               width = bar_width, height = bar_height, res = 200)
+      p_samp <- ggplot(samp_plot_dt, aes(x = sample, y = r2_overall)) +
+        geom_col(fill = "#1f77b4", width = 0.7) +
+        geom_hline(yintercept = overall_mean_r2, linetype = "dashed",
+                   color = "red", linewidth = 0.6) +
+        annotate("text", x = n_samp, y = overall_mean_r2,
+                 label = sprintf("mean = %.3f", overall_mean_r2),
+                 vjust = -0.5, hjust = 1, color = "red", size = 3.5) +
+        coord_cartesian(ylim = c(0, 1)) +
+        theme_minimal(base_size = 11) +
+        theme(
+          axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 7),
+          panel.grid.major.x = element_blank()
+        ) +
+        labs(
+          title = expression(paste("Per-sample ", r^2, " (sorted ascending)")),
+          x = "Sample",
+          y = expression(r^2)
+        )
+      print(p_samp)
+      dev.off()
     }
   }
 }

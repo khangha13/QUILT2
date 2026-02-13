@@ -99,6 +99,7 @@ Outputs (PREFIX.*):
   truth.AB_format.tsv                         Truth genotypes in A/B format
   translation_exceptions.tsv                  Unexpected GTs found during translation (if any)
   metrics.tsv                                 Per-variant r², concordance, MAF
+  per_sample_metrics.tsv                      Per-sample r², concordance, variant count
   summary.tsv                                 Overall summary statistics
   maf_bins.tsv                                Metrics aggregated by MAF bins
   concordance.parquet                         Per-site per-sample concordance (0/1/NA)
@@ -109,6 +110,7 @@ Outputs (PREFIX.*):
   r2_vs_maf_line.tsv                          Underlying binned data for the MAF line plot
   r2_per_chr_1Mb.png                          Mean r² per 1 Mb window, faceted by chromosome
   r2_per_chr_1Mb.tsv                          Underlying binned data for the per-chr plot
+  r2_per_sample.png                           Per-sample r² bar chart (sorted ascending)
 EOF
 }
 
