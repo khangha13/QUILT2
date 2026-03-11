@@ -60,7 +60,7 @@ Options:
   --help                Show this message and exit.
 
 Environment:
-  MINIFORGE_MODULE      Module name for miniforge (default: miniforge)
+  MINIFORGE_MODULE      Module name for miniforge (default: miniforge/25.3.0-3)
   CONDA_ENV             Conda environment to activate (default: myenv_py310)
   BCFTOOLS_MODULE       Module name for bcftools (default: bcftools/1.18-gcc-12.3.0)
 
@@ -71,14 +71,19 @@ Contig Name Handling:
 
 Processing Steps:
   1. Position-only intersection finds common (CHROM, POS) between VCFs.
+     Note: REF/ALT may be swapped (or otherwise represented differently) between
+     datasets. This is intentional: after removing strand-ambiguous loci and
+     translating bases to A/B via the AT vs CG grouping, A/B assignment is
+     invariant to REF/ALT swaps for the retained SNPs.
   2. Multi-allelic positions (decomposed into biallelic rows) are deduplicated.
   3. Strand-ambiguous loci (REF/ALT = A/T, T/A, C/G, G/C) are removed because
      they cannot be reliably assigned to the A or B allele class.
   4. Both VCFs are translated to A/B format:
        - Imputed: nucleotide pairs are grouped by AT/CG:
            Both in {A,T} → A/A | Mixed {A,T}×{C,G} → A/B | Both in {C,G} → B/B
-       - Truth: allele indices are mapped directly:
-           0/0 → A/A | 0/1 → A/B | 1/1 → B/B
+       - Truth: if REF/ALT are nucleotides (A/C/G/T), the same AT/CG grouping
+         is applied; if REF/ALT are already A/B allele labels, allele indices
+         are decoded directly to A/B.
   5. A/B dosages (A/A=0, A/B=1, B/B=2) are compared to compute r² and concordance.
 
 Skip Checks:
@@ -209,7 +214,7 @@ log_info "Temporary working directory: ${TMP_DIR}"
 # =============================================================================
 
 CONDA_ENV="${CONDA_ENV:-myenv_py310}"
-MINIFORGE_MODULE="${MINIFORGE_MODULE:-miniforge}"
+MINIFORGE_MODULE="${MINIFORGE_MODULE:-miniforge/25.3.0-3}"
 BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}"
 
 if command -v module >/dev/null 2>&1; then
@@ -606,26 +611,33 @@ else
 # reporting on, so the A/B assignment is unreliable. We remove them from BOTH
 # VCFs and record which positions were dropped.
 
-log_info "Identifying strand-ambiguous loci in imputed VCF"
+log_info "Identifying strand-ambiguous loci (imputed + truth)"
 
 AMBIGUOUS_LOCI="${TMP_DIR}/ambiguous_loci.tsv"
-bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${IMPUTED_OVERLAP_OUT}" \
-    | awk -F'\t' 'BEGIN{OFS="\t"}
-        ($3=="A" && $4=="T") || ($3=="T" && $4=="A") ||
-        ($3=="C" && $4=="G") || ($3=="G" && $4=="C") {print}
-      ' > "${AMBIGUOUS_LOCI}"
+{
+    bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${IMPUTED_OVERLAP_OUT}" \
+        | awk -F'\t' 'BEGIN{OFS="\t"}
+            ($3=="A" && $4=="T") || ($3=="T" && $4=="A") ||
+            ($3=="C" && $4=="G") || ($3=="G" && $4=="C") {print $1,$2,$3,$4,"imputed"}
+          '
+    bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "${TRUTH_OVERLAP_OUT}" \
+        | awk -F'\t' 'BEGIN{OFS="\t"}
+            ($3=="A" && $4=="T") || ($3=="T" && $4=="A") ||
+            ($3=="C" && $4=="G") || ($3=="G" && $4=="C") {print $1,$2,$3,$4,"truth"}
+          '
+} | sort -u > "${AMBIGUOUS_LOCI}"
 
 AMBIG_COUNT="$(wc -l < "${AMBIGUOUS_LOCI}" | tr -d ' ')"
 log_info "Found ${AMBIG_COUNT} strand-ambiguous position(s) to remove"
 
 {
-    echo -e "CHROM\tPOS\tREF\tALT"
+    echo -e "CHROM\tPOS\tREF\tALT\tSOURCE"
     cat "${AMBIGUOUS_LOCI}"
 } > "${AMBIG_REPORT}"
 log_info "Ambiguous loci report: ${AMBIG_REPORT}"
 
 AMBIG_POSITIONS="${TMP_DIR}/ambiguous_positions.tsv"
-awk -F'\t' 'BEGIN{OFS="\t"} {print $1, $2}' "${AMBIGUOUS_LOCI}" > "${AMBIG_POSITIONS}"
+awk -F'\t' 'BEGIN{OFS="\t"} {print $1, $2}' "${AMBIGUOUS_LOCI}" | sort -u > "${AMBIG_POSITIONS}"
 
 if [[ "${AMBIG_COUNT}" -gt 0 ]]; then
     log_info "Removing ${AMBIG_COUNT} ambiguous loci from both VCFs"
@@ -687,14 +699,16 @@ else
 #   - Heterozygous:   always A/B (one from each group)
 #   - Homozygous ALT: if ALT∈{A,T} → A/A; if ALT∈{C,G} → B/B
 #
-# --- TRUTH VCF (index-based translation) ---
-# Array genotypes use TOP-strand allele convention where:
-#   Allele index 0 (REF) = A allele
-#   Allele index 1 (ALT) = B allele
-# Therefore:
-#   0/0 → A/A   |   0/1 or 1/0 → A/B   |   1/1 → B/B
-#   ./.  → ./.
-#   Anything else → recorded as exception
+# --- TRUTH VCF (decode to A/B) ---
+# Two supported truth encodings:
+#   1) Standard nucleotide alleles (REF/ALT in A/C/G/T): decode GT→nucleotides
+#      then apply the same AT/CG grouping as the imputed VCF.
+#   2) Pre-encoded A/B alleles (REF/ALT in {A,B}): decode GT indices directly
+#      to A/B letters (this is useful if your array-derived truth has already
+#      been converted to an A/B allele representation upstream).
+#
+# In both cases, heterozygotes may appear as A/B or B/A; downstream code treats
+# them equivalently.
 
 # Build the TSV header (shared by both A/B files).
 readarray -t SAMPLE_ORDER < "${SAMPLE_SET}"
@@ -788,24 +802,55 @@ TRUTH_EXCEPTIONS="${TMP_DIR}/truth_exceptions.tsv"
 } | awk -F'\t' -v exc_file="${TRUTH_EXCEPTIONS}" '
 BEGIN { OFS = "\t" }
 
+function nuc_group(base) {
+    if (base == "A" || base == "T") return "A"
+    if (base == "C" || base == "G") return "B"
+    return "?"
+}
+
 NR == 1 { print; next }
 
 {
-    ref_orig = $3
-    alt_orig = $4
+    ref = $3
+    alt = $4
+    is_ab_alleles = ((ref == "A" || ref == "B") && (alt == "A" || alt == "B"))
 
     for (i = 6; i <= NF; i++) {
         gt = $i
 
-        if      (gt == "0/0" || gt == "0|0") $i = "A/A"
-        else if (gt == "0/1" || gt == "0|1") $i = "A/B"
-        else if (gt == "1/0" || gt == "1|0") $i = "A/B"
-        else if (gt == "1/1" || gt == "1|1") $i = "B/B"
-        else if (gt == "./." || gt == ".|.") $i = "./."
-        else {
-            print $1, $2, ref_orig, alt_orig, "sample_col=" i, gt >> exc_file
-            $i = "./."
+        if (gt == "./." || gt == ".|.") { $i = "./."; continue }
+
+        sep = "/"
+        n = split(gt, idx, "/")
+        if (n != 2) { n = split(gt, idx, "|"); sep = "|" }
+        if (n != 2) { print $1, $2, ref, alt, "sample_col=" i, gt >> exc_file; $i = "./."; continue }
+
+        a1 = ""
+        a2 = ""
+        if      (idx[1] == "0") a1 = ref
+        else if (idx[1] == "1") a1 = alt
+        else if (idx[1] == ".") { $i = "./."; continue }
+        else { print $1, $2, ref, alt, "sample_col=" i, gt >> exc_file; $i = "./."; continue }
+
+        if      (idx[2] == "0") a2 = ref
+        else if (idx[2] == "1") a2 = alt
+        else if (idx[2] == ".") { $i = "./."; continue }
+        else { print $1, $2, ref, alt, "sample_col=" i, gt >> exc_file; $i = "./."; continue }
+
+        if (is_ab_alleles) {
+            $i = a1 sep a2
+            continue
         }
+
+        g1 = nuc_group(a1)
+        g2 = nuc_group(a2)
+        if (g1 == "?" || g2 == "?") {
+            print $1, $2, ref, alt, "sample_col=" i, gt, a1, a2 >> exc_file
+            $i = "./."
+            continue
+        }
+
+        $i = g1 sep g2
     }
 
     print

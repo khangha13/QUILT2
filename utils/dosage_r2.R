@@ -91,7 +91,7 @@ load_gt_table <- function(path) {
 
 variant_key <- function(meta_dt) {
   # Position-only key. Genotypes have been translated to A/B format by
-  # dosage_r2.sh; REF/ALT columns retain original nucleotides.
+  # dosage_r2.sh; REF/ALT columns retain the original allele strings.
   # Matching on (CHROM, POS) is sufficient.
   paste(meta_dt$CHROM, meta_dt$POS, sep = ":")
 }
@@ -298,7 +298,11 @@ summary_dt <- data.table(
 )
 
 maf_bins <- c(0, 0.01, 0.05, 0.1, 0.2, 0.3, 0.5)
-metrics_dt[, maf_bin := cut(maf, breaks = maf_bins, include.lowest = TRUE, right = FALSE)]
+# Use left-closed bins ([a,b)) but ensure MAF=0.5 is included (MAF is defined as min(AF,1-AF)).
+maf_breaks <- maf_bins
+maf_breaks[length(maf_breaks)] <- maf_breaks[length(maf_breaks)] + 1e-8
+maf_labels <- c("[0,0.01)", "[0.01,0.05)", "[0.05,0.1)", "[0.1,0.2)", "[0.2,0.3)", "[0.3,0.5]")
+metrics_dt[, maf_bin := cut(maf, breaks = maf_breaks, include.lowest = TRUE, right = FALSE, labels = maf_labels)]
 maf_bins_dt <- metrics_dt[!is.na(maf_bin), .(
   variants = .N,
   r2_mean = mean(r2, na.rm = TRUE),
@@ -318,12 +322,14 @@ calc_sample_r2 <- function(ds_col, truth_col) {
   list(r2 = r2, n = n_nonmiss)
 }
 
-# MAF bins for per-sample breakdown: 0.0-0.1, 0.1-0.2, ..., 0.4-0.5
+# MAF bins for per-sample breakdown: [0.0,0.1), [0.1,0.2), ..., [0.4,0.5]
 sample_maf_breaks <- seq(0, 0.5, by = 0.1)
+sample_maf_breaks[length(sample_maf_breaks)] <- sample_maf_breaks[length(sample_maf_breaks)] + 1e-8
+sample_maf_labels <- c("[0.0,0.1)", "[0.1,0.2)", "[0.2,0.3)", "[0.3,0.4)", "[0.4,0.5]")
 # Assign each variant to a 0.1 MAF bin (using truth-derived MAF from metrics_dt).
 variant_maf <- metrics_dt$maf
 variant_maf_bin <- cut(variant_maf, breaks = sample_maf_breaks,
-                       include.lowest = TRUE, right = FALSE)
+                       include.lowest = TRUE, right = FALSE, labels = sample_maf_labels)
 maf_bin_labels <- levels(variant_maf_bin)
 
 sample_metrics_list <- vector("list", length(sample_order))
@@ -405,7 +411,13 @@ if (isTRUE(opts$plots)) {
     r2_maf_line_dt <- metrics_dt[!is.na(r2) & !is.na(maf)]
     if (nrow(r2_maf_line_dt) > 0) {
       maf_bin_width <- 0.01
-      r2_maf_line_dt[, maf_fine_bin := floor(maf / maf_bin_width) * maf_bin_width + maf_bin_width / 2]
+      # Fine bins (0.01 increments) with midpoints 0.005..0.495; clamp MAF=0.5 into the last bin.
+      max_bin_index <- (0.5 / maf_bin_width) - 1  # 49 for width=0.01
+      r2_maf_line_dt[, maf_fine_bin := {
+        idx <- floor(maf / maf_bin_width)
+        idx <- pmin(idx, max_bin_index)
+        idx * maf_bin_width + maf_bin_width / 2
+      }]
 
       r2_by_maf <- r2_maf_line_dt[, .(
         mean_r2    = mean(r2, na.rm = TRUE),
