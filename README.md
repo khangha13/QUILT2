@@ -3,12 +3,18 @@
 SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C array pattern from the GATK workflow.
 
 ## Layout
-- `bin/run_quilt2.sh` – orchestrator; builds chunk manifest, generates SLURM array script.
-- `templates/quilt2_job.sh` – array worker; processes one chunk (prepare + impute).
+- `bin/run_quilt2.sh` – orchestrator; builds chunk manifest, generates SLURM array script, self-submits.
+- `bin/dosage_r2_sbatch.sh` – SLURM submit wrapper for `modules/evaluate/dosage_r2.sh`.
+- `templates/quilt2_job.sh` – Phase 2 array worker; processes one chunk (prepare + impute).
+- `templates/quilt2_nomiss_job.sh` – Phase 1 array worker; standardises contig names and/or filters missing genotypes per chromosome.
 - `lib/functions.sh` – shared helpers (env bootstrap, bcftools/QUILT checks, panel/map resolution).
 - `config/quilt2_config.sh` – SLURM defaults (account/partition/qos/resources/array cap).
+- `config/environment.template.sh` – site-specific environment template; copy to `config/environment.sh` and customise.
+- `modules/evaluate/dosage_r2.sh` – post-imputation evaluation (concordance & dosage r/r²).
+- `modules/evaluate/dosage_r2.R` – R companion script for metrics computation and plots.
 - `quilt2_pipeline.legacy.sh` – pre-array monolithic script (kept only for rollback).
 - `quilt2_past_problem_and_solution.md` – troubleshooting history.
+- `dummy_map.md` – guide for creating dummy genetic maps when a species-specific map is unavailable.
 
 ## Prerequisites
 - Bash, SLURM.
@@ -18,16 +24,17 @@ SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C 
 
 ## Configuration (environment.sh)
 - Copy `config/environment.template.sh` to `config/environment.sh` and set site defaults (scratch/log roots, reference FASTA, genetic map path, panel dir).
-- SLURM defaults: `QUILT2_ACCOUNT`, `QUILT2_PARTITION`, `QUILT2_QOS`, `QUILT2_CPUS_PER_TASK`, `QUILT2_MEMORY`, `QUILT2_TIME_LIMIT`, `QUILT2_ARRAY_LIMIT` (0=no cap), `QUILT2_CONSTRAINT` (optional).
+- SLURM defaults: `QUILT2_ACCOUNT`, `QUILT2_PARTITION`, `QUILT2_QOS`, `QUILT2_NODES`, `QUILT2_NTASKS`, `QUILT2_CPUS_PER_TASK`, `QUILT2_MEMORY`, `QUILT2_TIME_LIMIT`, `QUILT2_ARRAY_MAX` (0=no cap; falls back to `QUILT2_ARRAY_LIMIT`), `QUILT2_CONSTRAINT` (optional).
 - Tooling: `BCFTOOLS_MODULE`, `QUILT2_CONDA_ENV`, optional `QUILT2_HOME`/`QUILT2_PREP_SCRIPT`/`QUILT2_RUN_SCRIPT`.
 - Behavior toggles: `QUILT2_CHROMS`, `QUILT2_BUFFER`, `QUILT2_NGEN`, `QUILT2_AUTO_CHUNK_MAP`, `QUILT2_CHUNK_FILE`, `QUILT2_REGION_START/END`, `QUILT2_REMOVE_MISSING`, `QUILT2_MIN_VALID_GT_RATE`, `QUILT2_STANDARDISE_NAME`, `QUILT2_STANDARDISE_NAME_FORCE`, `QUILT2_PREP_ONLY`, `QUILT2_IMPUTE_ONLY`, `QUILT2_DRY_RUN`, `QUILT2_BAMLIST`.
 
 ## Inputs
 - `--input-dir` (`WORK_DIR`) containing:
-  - Panel VCFs under `8.Imputated_VCF_BEAGLE/` (preferred) or `7.Consolidated_VCF/`; otherwise `WORK_DIR` is searched.
+  - Panel VCFs under `8.Imputated_VCF_BEAGLE/` (preferred) or `7.Consolidated_VCF/`; otherwise `WORK_DIR` is searched. Override with `--reference-panel-dir`.
   - `bamlist.txt` (or `bamlist.1.0.txt` / `bamlist.tsv`) unless running `--prepare-only`; **still required for `--impute-only`**.
-- Genetic map: `--genetic-map` file or directory with per-chromosome maps. Names must match `--chr` values (`Chr01` vs `1`, etc.).
+- Genetic map: `--genetic-map` file or directory with per-chromosome maps. Names must match `--chr` values (`Chr01` vs `1`, etc.). See `dummy_map.md` for creating maps when none are available.
 - Reference panel should be **phased**; use `--remove-missing` with `--min-valid-gt-rate` if needed.
+- Optional: `--reference-fasta` with `.fai` index, used to fix VCF headers with missing contigs during `--standardise-name`.
 - Ensure VCFs are indexed (`.tbi/.csi`).
 
 ## Quick Start
@@ -75,6 +82,16 @@ Point to QUILT2 scripts:
   --quilt2-run-script /path/to/QUILT2.R
 ```
 
+Per-chunk evaluation against a truth VCF (uses vcfppR):
+```bash
+bash bin/run_quilt2.sh \
+  -i /path/to/work_dir \
+  --genetic-map /path/to/genetic_maps_dir \
+  --region-start 1 --region-end 5000000 \
+  --truth-vcf /path/to/truth.vcf.gz \
+  --eval-output /path/to/eval_dir
+```
+
 SLURM overrides (env, matches Step1C style):
 ```bash
 export QUILT2_ACCOUNT=youracct
@@ -83,17 +100,17 @@ export QUILT2_QOS=normal
 export QUILT2_CPUS_PER_TASK=8
 export QUILT2_MEMORY=48G
 export QUILT2_TIME_LIMIT=12:00:00
-export QUILT2_ARRAY_LIMIT=0   # 0 = no cap
+export QUILT2_ARRAY_MAX=0   # 0 = no cap
 export QUILT2_CONSTRAINT=epyc4
 ```
 
 ## Execution model (self-submit + phases)
 - Default: `bin/run_quilt2.sh` self-submits via `sbatch` when not already in SLURM, then exits. Opt out with `--no-submit` or `--submit-self=false`. Master job ID: `quilt2_slurm/quilt2_master_job_id.txt`; logs: `quilt2_slurm/quilt2_master_%j.(output|error)`.
-- Phase 1 (panel prep array): runs per chromosome when `--standardise-name` and/or `--remove-missing` are set. Outputs in `quilt2_output/panel/`:
+- Phase 1 (panel prep array): runs per chromosome when `--standardise-name` and/or `--remove-missing` are set. Uses `templates/quilt2_nomiss_job.sh`. Outputs in `quilt2_output/panel/`:
   - Standardised: `<chr>_chr.vcf.gz` (+ index), skipped unless `--standardise-name-force`.
   - Filtered: `quilt.nomiss.<chr>.vcf.gz` (+ index) when `--remove-missing`.
   - Job ID/logs: `quilt2_slurm/quilt2_nomiss_job_id.txt`, `quilt2_slurm/quilt2_nomiss_%A_%a.(output|error)`.
-- Phase 2 (chunk array): uses `quilt2_output/panel/` if Phase 1 ran; otherwise the original panel dir. Job ID/logs: `quilt2_slurm/quilt2_job_id.txt`, `quilt2_slurm/quilt2_%A_%a.(output|error)`.
+- Phase 2 (chunk array): uses `quilt2_output/panel/` if Phase 1 ran; otherwise the original panel dir. Uses `templates/quilt2_job.sh`. Job ID/logs: `quilt2_slurm/quilt2_job_id.txt`, `quilt2_slurm/quilt2_%A_%a.(output|error)`.
 - `--dry-run` prints the master sbatch command and exits; Phase 1/2 scripts are still generated for inspection.
 
 Cache awareness (when changing inputs/settings):
@@ -104,16 +121,80 @@ Cache awareness (when changing inputs/settings):
 ## Troubleshooting
 See `quilt2_past_problem_and_solution.md` for fixes on genetic map columns, chr naming, symlinks, chunk parsing, phased panel requirements, and cache invalidation. Use `--dry-run` first to ensure SLURM script generation succeeds before submitting.
 
-## Concordance & dosage r2 (imputed vs truth)
-- Utility: `utils/dosage_r2.sh` (bash) + `utils/dosage_r2.R` (R/data.table/ggplot2). Loads `miniforge/25.3.0-3` and bcftools; activates `QUILT2_CONDA_ENV` when available.
-- Inputs: imputed VCF with `DS` (or `GP` fallback) and truth VCF with `GT`; both indexed. Samples default to the intersection; supply `--samples` to override.
-- Behavior: intersects sites allele-aware (`bcftools isec`), restricts to biallelic SNPs by default, extracts DS/GP and GT, computes per-variant r2 and genotype concordance, plus MAF-binned summaries; optional plots via R.
-- Example:
+## Concordance & dosage r² (imputed vs truth)
+
+Post-imputation evaluation comparing imputed genotypes against a truth (array) VCF.
+
+### Scripts
+- `modules/evaluate/dosage_r2.sh` (bash) + `modules/evaluate/dosage_r2.R` (R/data.table/ggplot2).
+- `bin/dosage_r2_sbatch.sh` – SLURM submit wrapper (recommended for cluster runs).
+
+### Environment
+Loads `miniforge/25.3.0-3` and bcftools modules. Activates conda env `CONDA_ENV` (default `myenv_py310`); override with `CONDA_ENV`, `MINIFORGE_MODULE`, or `BCFTOOLS_MODULE` environment variables.
+
+### How it works
+Dosages are derived from GT fields only; DS/GP tags are not used. The pipeline:
+1. Normalizes contig names to canonical ChrNN format.
+2. Finds overlapping positions (CHROM + POS) between imputed and truth VCFs via position-only intersection.
+3. Deduplicates multi-allelic positions (`bcftools norm -d snps`).
+4. Removes strand-ambiguous loci (A/T, T/A, C/G, G/C) that cannot be reliably assigned to allele classes.
+5. Translates both VCFs to A/B format using AT/CG nucleotide grouping (A,T → group A; C,G → group B).
+6. Feeds A/B genotype TSVs to R for per-variant r (signed Pearson) and r², genotype concordance, MAF-binned summaries, per-sample metrics, and diagnostic plots.
+
+### Inputs
+- Imputed VCF and truth VCF (both with GT fields; both indexed).
+- Samples default to the intersection; supply `--samples` to override.
+
+### Options
+- `--region STR` – limit evaluation to a region (e.g., `Chr01:1-1e6`).
+- `--use-vcfpp` – additionally run vcfppR comparison on unambiguous VCFs.
+- `--no-parquet` – skip writing the concordance Parquet file.
+- `--no-biallelic-only` – do not restrict to biallelic SNPs (default: restrict).
+- `--no-plots` – skip plotting; only produce metric TSVs.
+- `--force` – re-run all steps even if output files already exist.
+- `--keep-temp` – do not delete the temporary working directory.
+
+### Outputs (PREFIX.*)
+| File | Description |
+|------|-------------|
+| `metrics.tsv` | Per-variant r (signed Pearson), r², concordance, MAF |
+| `per_sample_metrics.tsv` | Per-sample r and r², overall and per 0.1 MAF bin |
+| `summary.tsv` | Overall r_mean, r_median, r2_mean, r2_median, concordance_mean |
+| `maf_bins.tsv` | r_mean, r2_mean, concordance aggregated by MAF bins |
+| `concordance.parquet` | Per-site per-sample concordance (0/1/NA) |
+| `IMPUTED_overlapped_only.vcf.gz` | Imputed VCF at common positions (deduped) |
+| `TRUTH_overlapped_only.vcf.gz` | Truth VCF at common positions (deduped) |
+| `IMPUTED_overlapped_unambiguous_only.vcf.gz` | Imputed VCF after removing ambiguous loci |
+| `TRUTH_overlapped_unambiguous_only.vcf.gz` | Truth VCF after removing ambiguous loci |
+| `ambiguous_loci_removed.tsv` | Strand-ambiguous positions that were removed |
+| `duplicates_removed.{imputed,truth}.tsv` | Duplicate positions removed |
+| `imputed.AB_format.tsv` | Imputed genotypes in A/B format |
+| `truth.AB_format.tsv` | Truth genotypes in A/B format |
+| `translation_exceptions.tsv` | Unexpected GTs found during translation |
+| `r2_hist.png` | Distribution of r² |
+| `concordance_hist.png` | Distribution of concordance |
+| `r2_vs_maf.png` | r² vs MAF heatmap |
+| `r2_vs_maf_line.{png,tsv}` | Mean r² vs MAF line plot (0.01 bins) |
+| `r2_per_chr_1Mb.{png,tsv}` | Mean r² per 1 Mb window, faceted by chromosome |
+| `r2_per_sample.png` | Per-sample r² bar chart (sorted ascending by r²) |
+
+### Examples
+
+Direct execution:
 ```bash
-bash utils/dosage_r2.sh \
+bash modules/evaluate/dosage_r2.sh \
   --imputed /path/imputed.vcf.gz \
   --truth /path/truth.vcf.gz \
   --out-prefix results/dosage_eval \
-  --region chr1 \
+  --region Chr01:1-1e6 \
   --samples common_samples.txt
+```
+
+Via SLURM (recommended):
+```bash
+bash bin/dosage_r2_sbatch.sh \
+  --imputed /path/imputed.vcf.gz \
+  --truth /path/truth.vcf.gz \
+  --out-prefix results/dosage_eval \
+  -- --region Chr01:1-1e6 --samples common_samples.txt
 ```

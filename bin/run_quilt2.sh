@@ -48,7 +48,7 @@ Core options:
   --quilt2-prepare-script PATH Override QUILT2_prepare_reference.R
   --quilt2-run-script PATH     Override QUILT2.R
   --remove-missing             Filter panel variants by phased rate
-  --min-phased-rate FLOAT      Fraction with phased genotypes to keep (default 0.95)
+  --min-valid-gt-rate FLOAT    Fraction with phased genotypes to keep (default 0.95)
   --prepare-only               Run prepare phase only
   --impute-only                Skip prepare; assumes prepared reference exists
   --dry-run                    Print commands without executing

@@ -11,9 +11,11 @@
 #   2. Find overlapping positions (CHROM + POS) between imputed and truth VCFs
 #   3. Deduplicate multi-allelic positions (bcftools norm -d snps)
 #   4. Remove strand-ambiguous (A/T, T/A, C/G, G/C) loci
-#   5. Translate both VCFs to A/B format:
-#        - Imputed: decode GT to nucleotides via REF/ALT, group by AT/CG
-#        - Truth:   simple index mapping (0/0→A/A, 0/1→A/B, 1/1→B/B)
+#   5. Translate both VCFs to A/B format using the SAME nucleotide-based rule:
+#        Decode GT index → actual nucleotide (using REF/ALT), then group:
+#          {A,T} → A  |  {C,G} → B
+#        Both VCFs use this identical rule, so a biologically identical genotype
+#        always yields the same dosage value regardless of REF/ALT orientation.
 #   6. Feed A/B genotype TSVs to R for r², concordance, and plots
 #
 # Dosages are derived from GT fields only; DS/GP tags are not used.
@@ -23,7 +25,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# Script lives at <repo>/modules/evaluate/dosage_r2.sh, so climb two levels.
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 LIB_PATH="${ROOT_DIR}/lib/functions.sh"
 
 if [[ ! -f "${LIB_PATH}" ]]; then
@@ -78,19 +81,25 @@ Processing Steps:
   2. Multi-allelic positions (decomposed into biallelic rows) are deduplicated.
   3. Strand-ambiguous loci (REF/ALT = A/T, T/A, C/G, G/C) are removed because
      they cannot be reliably assigned to the A or B allele class.
-  4. Both VCFs are translated to A/B format:
-       - Imputed: nucleotide pairs are grouped by AT/CG:
-           Both in {A,T} → A/A | Mixed {A,T}×{C,G} → A/B | Both in {C,G} → B/B
-       - Truth: if REF/ALT are nucleotides (A/C/G/T), the same AT/CG grouping
-         is applied; if REF/ALT are already A/B allele labels, allele indices
-         are decoded directly to A/B.
+  4. Both VCFs are translated to A/B format using the SAME nucleotide-based rule:
+       GT index 0 → REF nucleotide, index 1 → ALT nucleotide; then:
+         {A,T} → A, {C,G} → B
+       So: both-AT → A/A | one AT + one CG → A/B | both-CG → B/B
+       Special case: if REF/ALT are already A/B labels (pre-encoded array data),
+       the allele letters are passed through directly without re-grouping.
+       Using the same rule for both VCFs ensures that a biologically identical
+       genotype always maps to the same dosage regardless of REF/ALT orientation.
   5. A/B dosages (A/A=0, A/B=1, B/B=2) are compared to compute r² and concordance.
 
 Skip Checks:
-  Each step checks whether its output files already exist. If they do, the step
-  is skipped with a [SKIP] log message. Use --force to re-run all steps regardless.
-  Checkpoints: overlapped VCFs (Steps 1-3), unambiguous VCFs (Step 4),
-  A/B TSVs (Step 5), metrics.tsv (Step 6).
+  Each step is skipped automatically when its output files already exist and are
+  non-empty. This works for fresh runs, resumed runs, and runs predating any cache
+  system — no sentinel files are needed or checked.
+  Use --force to delete all step outputs and re-run everything from scratch.
+  To re-run a single step, delete its output files and re-run the script, e.g.:
+    rm PREFIX.IMPUTED_overlapped_only.vcf.gz PREFIX.TRUTH_overlapped_only.vcf.gz
+  A human-readable audit log (PREFIX.pipeline_audit.tsv) is appended after each
+  completed step, recording the timestamp and key variant counts.
 
 Outputs (PREFIX.*):
   IMPUTED_overlapped_only.vcf.gz              Imputed VCF at common positions (deduped)
@@ -116,6 +125,7 @@ Outputs (PREFIX.*):
   r2_per_chr_1Mb.png                          Mean r² per 1 Mb window, faceted by chromosome
   r2_per_chr_1Mb.tsv                          Underlying binned data for the per-chr plot
   r2_per_sample.png                           Per-sample r² bar chart (sorted ascending)
+  pipeline_audit.tsv                         Append-only log: step name, timestamp, counts
 EOF
 }
 
@@ -302,10 +312,54 @@ EXCEPTION_REPORT="${OUT_PREFIX}.translation_exceptions.tsv"
 METRICS_TSV="${OUT_PREFIX}.metrics.tsv"
 COMMON_SAMPLES_OUT="${OUT_PREFIX}.common_samples.txt"
 
-# Helper: check if a set of files all exist (for skip logic).
+# --- Run audit log ---
+# A single append-only TSV that records each completed step: when it ran and
+# what it produced. Never read by the pipeline — purely for human inspection.
+# The skip decision is made solely from the output files (see step_done below).
+PIPELINE_AUDIT_LOG="${OUT_PREFIX}.pipeline_audit.tsv"
+
+if [[ "${FORCE}" == "true" ]]; then
+    log_warn "--force: deleting all step output files to trigger a full re-run"
+    rm -f "${IMPUTED_OVERLAP_OUT}" "${IMPUTED_OVERLAP_OUT}.csi"
+    rm -f "${TRUTH_OVERLAP_OUT}"   "${TRUTH_OVERLAP_OUT}.csi"
+    rm -f "${IMPUTED_UNAMBIG_OUT}" "${IMPUTED_UNAMBIG_OUT}.csi"
+    rm -f "${TRUTH_UNAMBIG_OUT}"   "${TRUTH_UNAMBIG_OUT}.csi"
+    rm -f "${IMPUTED_AB_TSV}" "${TRUTH_AB_TSV}"
+    rm -f "${METRICS_TSV}" "${COMMON_SAMPLES_OUT}"
+    log_warn "Cleared outputs; all steps will re-run"
+fi
+
+# Helper: skip a step when --force is off and every output file is non-empty.
+# This is the sole skip gate. Works equally for fresh runs, resumed runs, and
+# runs predating this cache system — no sentinel files needed.
+# Usage: step_done <output_files...>
+step_done() {
+    [[ "${FORCE}" == "true" ]] && return 1
+    for f in "$@"; do
+        [[ -s "${f}" ]] || return 1   # -s: exists AND non-empty
+    done
+    return 0
+}
+
+# Helper: append a completed-step record to the audit log.
+# Usage: log_step_done <step_name> [key=value ...]
+log_step_done() {
+    local step="$1"; shift
+    local ts
+    ts="$(date -Iseconds)"
+    # Write TSV header on first call (file does not yet exist).
+    if [[ ! -f "${PIPELINE_AUDIT_LOG}" ]]; then
+        printf "timestamp\tstep\tdetails\n" > "${PIPELINE_AUDIT_LOG}"
+    fi
+    local details
+    details="$(IFS=','; echo "$*")"
+    printf "%s\t%s\t%s\n" "${ts}" "${step}" "${details}" >> "${PIPELINE_AUDIT_LOG}"
+}
+
+# Helper: check that all listed files are non-empty (ad-hoc guard, separate from skip logic).
 all_exist() {
     for f in "$@"; do
-        [[ -f "$f" ]] || return 1
+        [[ -s "$f" ]] || return 1
     done
     return 0
 }
@@ -320,8 +374,8 @@ if [[ -n "${SAMPLE_FILE}" ]]; then
         log_error "Sample file not found: ${SAMPLE_FILE}"
         exit 1
     fi
-elif [[ "${FORCE}" == "false" ]] && [[ -f "${COMMON_SAMPLES_OUT}" ]]; then
-    log_info "[SKIP] Common sample set already exists: ${COMMON_SAMPLES_OUT}"
+elif step_done "${COMMON_SAMPLES_OUT}"; then
+    log_info "[SKIP] Common sample set already derived: ${COMMON_SAMPLES_OUT}"
     SAMPLE_SET="${COMMON_SAMPLES_OUT}"
 else
     log_info "Deriving common sample set from both VCFs"
@@ -335,6 +389,8 @@ else
     # Save to persistent output location
     cp "${TMP_DIR}/common.samples" "${COMMON_SAMPLES_OUT}"
     SAMPLE_SET="${COMMON_SAMPLES_OUT}"
+    n_common="$(wc -l < "${COMMON_SAMPLES_OUT}" | tr -d ' ')"
+    log_step_done "samples" "samples=${n_common}"
 fi
 
 SAMPLE_COUNT="$(wc -l < "${SAMPLE_SET}" | tr -d ' ')"
@@ -453,7 +509,7 @@ report_removed_duplicates() {
 # =============================================================================
 # Skip if overlapped VCFs already exist from a previous run (use --force to redo).
 
-if [[ "${FORCE}" == "false" ]] && all_exist "${IMPUTED_OVERLAP_OUT}" "${TRUTH_OVERLAP_OUT}"; then
+if step_done "${IMPUTED_OVERLAP_OUT}" "${TRUTH_OVERLAP_OUT}"; then
     log_info "[SKIP] Steps 1-3: Overlapped VCFs already exist"
     log_info "  ${IMPUTED_OVERLAP_OUT}"
     log_info "  ${TRUTH_OVERLAP_OUT}"
@@ -590,6 +646,11 @@ cp "${TRUTH_OVERLAPPED}" "${TRUTH_OVERLAP_OUT}"
 cp "${TRUTH_OVERLAPPED}.csi" "${TRUTH_OVERLAP_OUT}.csi" 2>/dev/null || bcftools index -f -c "${TRUTH_OVERLAP_OUT}"
 log_info "Saved: ${IMPUTED_OVERLAP_OUT}"
 log_info "Saved: ${TRUTH_OVERLAP_OUT}"
+log_step_done "overlap" \
+    "imputed_prededup=${IMPUTED_PREDEDUP_N}" \
+    "truth_prededup=${TRUTH_PREDEDUP_N}" \
+    "imputed_after_dedup=${IMPUTED_OVERLAPPED_N}" \
+    "truth_after_dedup=${TRUTH_OVERLAPPED_N}"
 
 fi  # end Steps 1-3 skip-check
 
@@ -598,7 +659,7 @@ fi  # end Steps 1-3 skip-check
 # =============================================================================
 # Skip if unambiguous VCFs already exist from a previous run.
 
-if [[ "${FORCE}" == "false" ]] && all_exist "${IMPUTED_UNAMBIG_OUT}" "${TRUTH_UNAMBIG_OUT}"; then
+if step_done "${IMPUTED_UNAMBIG_OUT}" "${TRUTH_UNAMBIG_OUT}"; then
     log_info "[SKIP] Step 4: Unambiguous VCFs already exist"
     log_info "  ${IMPUTED_UNAMBIG_OUT}"
     log_info "  ${TRUTH_UNAMBIG_OUT}"
@@ -662,6 +723,10 @@ fi
 
 log_info "Saved: ${IMPUTED_UNAMBIG_OUT}"
 log_info "Saved: ${TRUTH_UNAMBIG_OUT}"
+log_step_done "unambiguous" \
+    "imputed_variants=${IMPUTED_UNAMBIG_N}" \
+    "truth_variants=${TRUTH_UNAMBIG_N}" \
+    "ambiguous_removed=${AMBIG_COUNT}"
 
 fi  # end Step 4 skip-check
 
@@ -670,7 +735,7 @@ fi  # end Step 4 skip-check
 # =============================================================================
 # Skip if A/B format TSVs already exist from a previous run.
 
-if [[ "${FORCE}" == "false" ]] && all_exist "${IMPUTED_AB_TSV}" "${TRUTH_AB_TSV}"; then
+if step_done "${IMPUTED_AB_TSV}" "${TRUTH_AB_TSV}"; then
     log_info "[SKIP] Step 5: A/B format TSVs already exist"
     log_info "  ${IMPUTED_AB_TSV}"
     log_info "  ${TRUTH_AB_TSV}"
@@ -813,6 +878,27 @@ NR == 1 { print; next }
 {
     ref = $3
     alt = $4
+
+    # Detect whether this row is already in A/B encoding (pre-processed array data)
+    # rather than standard nucleotide alleles (A/C/G/T).
+    #
+    # This check is safe under two pipeline assumptions that must hold together:
+    #
+    # Assumption 1 — "B" is not a valid IUPAC nucleotide allele.
+    #   A standard VCF will never have REF or ALT equal to "B".
+    #   Therefore, if either allele is "B", the row must be from a pre-encoded
+    #   A/B truth file, and the GT indices (0,1) map directly to "A" or "B"
+    #   without needing nucleotide-to-group translation.
+    #
+    # Assumption 2 — Strand-ambiguous loci were removed in Step 4.
+    #   After Step 4, every remaining nucleotide variant has one allele from
+    #   {A,T} and one from {C,G}.  No such pair can have BOTH alleles within
+    #   {"A","B"} (e.g. REF=A, ALT=C: REF matches but ALT "C" does not).
+    #   This means the check cannot accidentally fire on a real nucleotide VCF,
+    #   even though "A" is both a nucleotide and an A/B-group label.
+    #
+    # If either assumption is violated upstream, this detection will silently
+    # misclassify rows — add an explicit --truth-is-ab flag if that becomes a risk.
     is_ab_alleles = ((ref == "A" || ref == "B") && (alt == "A" || alt == "B"))
 
     for (i = 6; i <= NF; i++) {
@@ -879,6 +965,11 @@ else
     log_info "No translation exceptions found"
 fi
 
+log_step_done "ab_translate" \
+    "imputed_variants=${IMPUTED_AB_N}" \
+    "truth_variants=${TRUTH_AB_N}" \
+    "exceptions=${EXCEPTION_COUNT}"
+
 fi  # end Step 5 skip-check
 
 # =============================================================================
@@ -886,7 +977,7 @@ fi  # end Step 5 skip-check
 # =============================================================================
 # Skip if metrics TSV already exists from a previous run.
 
-if [[ "${FORCE}" == "false" ]] && all_exist "${METRICS_TSV}"; then
+if step_done "${METRICS_TSV}"; then
     log_info "[SKIP] Step 6: Metrics already exist"
     log_info "  ${METRICS_TSV}"
 else
@@ -924,6 +1015,7 @@ fi
 
 log_info "Running R metrics helper"
 run_cmd Rscript "${R_ARGS[@]}"
+log_step_done "metrics" "metrics_file=${METRICS_TSV}"
 
 fi  # end Step 6 skip-check
 

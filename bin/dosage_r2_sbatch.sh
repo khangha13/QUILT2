@@ -1,5 +1,5 @@
 #!/bin/bash
-# Submit helper: wraps utils/dosage_r2.sh in sbatch with logs placed beside the outputs.
+# Submit helper: wraps modules/evaluate/dosage_r2.sh in sbatch with logs placed beside the outputs.
 # Usage:
 #   bash bin/dosage_r2_sbatch.sh --imputed /path/imputed.vcf.gz --truth /path/truth.vcf.gz [--out-prefix prefix] [-- extra flags]
 # If run under SLURM (SLURM_JOB_ID set), it will execute dosage_r2.sh directly (no re-submit).
@@ -8,7 +8,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DOSAGE_SCRIPT="${ROOT_DIR}/utils/dosage_r2.sh"
+DOSAGE_SCRIPT="${ROOT_DIR}/modules/evaluate/dosage_r2.sh"
 ENV_FILE="${ROOT_DIR}/config/environment.sh"
 ENV_TEMPLATE="${ROOT_DIR}/config/environment.template.sh"
 
@@ -19,7 +19,7 @@ Usage:
 
 Notes:
   - OUT_PREFIX defaults to the imputed VCF basename (without .vcf.gz).
-  - Extra args after -- are forwarded to utils/dosage_r2.sh (e.g., --samples FILE --region chr1:1-1e6 --no-parquet --use-vcfpp).
+  - Extra args after -- are forwarded to modules/evaluate/dosage_r2.sh (e.g., --samples FILE --region chr1:1-1e6 --no-parquet --use-vcfpp).
   - Resources/logs honor QUILT2_* env if set (ACCOUNT, PARTITION, QOS, CPUS_PER_TASK, MEMORY, TIME_LIMIT).
   - Logs are written to <out_dir>/slurm/dosage_r2_%j.(out|err).
   - Requires miniforge module and conda env myenv_py310 (override MINIFORGE_MODULE/CONDA_ENV),

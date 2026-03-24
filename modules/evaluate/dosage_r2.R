@@ -164,13 +164,17 @@ calc_variant_metrics <- function(ds_row, truth_row) {
     maf <- min(af, 1 - af)
   }
   if (n_nonmiss < 2) {
-    return(list(r2 = NA_real_, concordance = NA_real_, maf = maf, n = n_nonmiss))
+    return(list(r = NA_real_, r2 = NA_real_, concordance = NA_real_, maf = maf, n = n_nonmiss))
   }
-  r2 <- suppressWarnings(cor(ds_row[keep], truth_row[keep])^2)
+  # r is the signed Pearson correlation; r2 = r^2 (direction-aware).
+  # A negative r flags variants where imputed and truth dosages are anti-correlated —
+  # indicating a possible translation or allele-encoding error for that variant.
+  r  <- suppressWarnings(cor(ds_row[keep], truth_row[keep]))
+  r2 <- if (!is.na(r)) r^2 else NA_real_
   ghat <- ifelse(ds_row[keep] >= 1.5, 2,
                  ifelse(ds_row[keep] <= 0.5, 0, 1))
   conc <- mean(ghat == round(truth_row[keep]))
-  list(r2 = r2, concordance = conc, maf = maf, n = n_nonmiss)
+  list(r = r, r2 = r2, concordance = conc, maf = maf, n = n_nonmiss)
 }
 
 write_concordance_parquet <- function(meta_dt, imputed_ds, truth_ds, sample_ids, out_prefix) {
@@ -274,21 +278,38 @@ if (!is.null(opts$imputed_gt)) {
 
 truth_dosage <- gt_to_dosage(truth_gt$mat)
 
+# =============================================================================
+# PER-VARIANT METRICS
+# =============================================================================
+# Both imputed and truth genotypes are translated using the same nucleotide-based
+# A/B rule (dosage_r2.sh step 5): decode GT index → nucleotide, then assign
+# A (AT-group, dosage 0) or B (CG-group, dosage 2). Because the rule is
+# identical for both VCFs, a biologically identical genotype always yields the
+# same dosage value regardless of which allele is listed as REF or ALT in
+# either file. No post-hoc direction flipping is needed or appropriate.
+#
+# r²          = cor(imputed_dosage, truth_dosage)²   per variant
+# concordance = mean(round(imputed) == round(truth))  per variant
+
 metrics_list <- vector("list", nrow(variant_meta))
 for (i in seq_len(nrow(variant_meta))) {
   res <- calc_variant_metrics(ds_mat[i, ], truth_dosage[i, ])
   metrics_list[[i]] <- cbind(variant_meta[i], data.table(
-    maf = res$maf,
+    maf           = res$maf,
     n_non_missing = res$n,
-    r2 = res$r2,
-    concordance = res$concordance
+    r             = res$r,
+    r2            = res$r2,
+    concordance   = res$concordance
   ))
 }
 metrics_dt <- rbindlist(metrics_list)
 
 summary_dt <- data.table(
-  metric = c("r2_mean", "r2_median", "concordance_mean", "variants_total", "variants_with_r2"),
+  metric = c("r_mean", "r_median", "r2_mean", "r2_median",
+             "concordance_mean", "variants_total", "variants_with_r2"),
   value = c(
+    mean(metrics_dt$r,  na.rm = TRUE),
+    median(metrics_dt$r,  na.rm = TRUE),
     mean(metrics_dt$r2, na.rm = TRUE),
     median(metrics_dt$r2, na.rm = TRUE),
     mean(metrics_dt$concordance, na.rm = TRUE),
@@ -304,8 +325,9 @@ maf_breaks[length(maf_breaks)] <- maf_breaks[length(maf_breaks)] + 1e-8
 maf_labels <- c("[0,0.01)", "[0.01,0.05)", "[0.05,0.1)", "[0.1,0.2)", "[0.2,0.3)", "[0.3,0.5]")
 metrics_dt[, maf_bin := cut(maf, breaks = maf_breaks, include.lowest = TRUE, right = FALSE, labels = maf_labels)]
 maf_bins_dt <- metrics_dt[!is.na(maf_bin), .(
-  variants = .N,
-  r2_mean = mean(r2, na.rm = TRUE),
+  variants         = .N,
+  r_mean           = mean(r,  na.rm = TRUE),
+  r2_mean          = mean(r2, na.rm = TRUE),
   concordance_mean = mean(concordance, na.rm = TRUE)
 ), by = maf_bin]
 
@@ -314,12 +336,13 @@ maf_bins_dt <- metrics_dt[!is.na(maf_bin), .(
 # 0.1 MAF bin. This helps identify individual samples that may be pulling the
 # dataset r² down, and whether the issue is concentrated in specific MAF ranges.
 
-calc_sample_r2 <- function(ds_col, truth_col) {
+calc_sample_metrics <- function(ds_col, truth_col) {
   keep <- !(is.na(ds_col) | is.na(truth_col))
   n_nonmiss <- sum(keep)
-  if (n_nonmiss < 2) return(list(r2 = NA_real_, n = n_nonmiss))
-  r2 <- suppressWarnings(cor(ds_col[keep], truth_col[keep])^2)
-  list(r2 = r2, n = n_nonmiss)
+  if (n_nonmiss < 2) return(list(r = NA_real_, r2 = NA_real_, n = n_nonmiss))
+  r  <- suppressWarnings(cor(ds_col[keep], truth_col[keep]))
+  r2 <- if (!is.na(r)) r^2 else NA_real_
+  list(r = r, r2 = r2, n = n_nonmiss)
 }
 
 # MAF bins for per-sample breakdown: [0.0,0.1), [0.1,0.2), ..., [0.4,0.5]
@@ -334,22 +357,25 @@ maf_bin_labels <- levels(variant_maf_bin)
 
 sample_metrics_list <- vector("list", length(sample_order))
 for (j in seq_along(sample_order)) {
-  # Overall r².
-  res <- calc_sample_r2(ds_mat[, j], truth_dosage[, j])
-  row <- data.table(sample = sample_order[j],
+  # Overall r and r².
+  res <- calc_sample_metrics(ds_mat[, j], truth_dosage[, j])
+  row <- data.table(sample     = sample_order[j],
+                    r_overall  = res$r,
                     r2_overall = res$r2,
                     n_variants = res$n)
 
-  # r² per 0.1 MAF bin.
+  # r and r² per 0.1 MAF bin.
   for (b in maf_bin_labels) {
     idx <- which(variant_maf_bin == b)
     if (length(idx) >= 2) {
-      bres <- calc_sample_r2(ds_mat[idx, j], truth_dosage[idx, j])
+      bres <- calc_sample_metrics(ds_mat[idx, j], truth_dosage[idx, j])
+      set(row, j = paste0("r_maf_",  b), value = bres$r)
       set(row, j = paste0("r2_maf_", b), value = bres$r2)
-      set(row, j = paste0("n_maf_", b),  value = bres$n)
+      set(row, j = paste0("n_maf_",  b), value = bres$n)
     } else {
+      set(row, j = paste0("r_maf_",  b), value = NA_real_)
       set(row, j = paste0("r2_maf_", b), value = NA_real_)
-      set(row, j = paste0("n_maf_", b),  value = length(idx))
+      set(row, j = paste0("n_maf_",  b), value = length(idx))
     }
   }
 
@@ -527,6 +553,43 @@ if (isTRUE(opts$plots)) {
         )
       print(p_samp)
       dev.off()
+
+      # --- Per-sample r bar plot (signed, shows direction) ---
+      # Bars are coloured blue (r > 0) or red (r < 0). A negative r for a sample
+      # means that sample's imputed dosages are globally anti-correlated with truth —
+      # a strong indicator of a sample mislabel or allele-encoding error.
+      samp_r_dt <- sample_metrics_dt[!is.na(r_overall)]
+      if (nrow(samp_r_dt) > 0) {
+        samp_r_dt[, sample := factor(sample, levels = samp_plot_dt$sample)]  # same sort order as r2
+        overall_mean_r  <- mean(samp_r_dt$r_overall, na.rm = TRUE)
+
+        open_png(sprintf("%s.r_per_sample.png", out_prefix),
+                 width = bar_width, height = bar_height, res = 200)
+        p_samp_r <- ggplot(samp_r_dt, aes(x = sample, y = r_overall,
+                                           fill = r_overall >= 0)) +
+          geom_col(width = 0.7, show.legend = FALSE) +
+          scale_fill_manual(values = c("TRUE" = "#1f77b4", "FALSE" = "#d62728")) +
+          geom_hline(yintercept = 0, linewidth = 0.5, color = "black") +
+          geom_hline(yintercept = overall_mean_r, linetype = "dashed",
+                     color = "darkgreen", linewidth = 0.6) +
+          annotate("text", x = n_samp, y = overall_mean_r,
+                   label = sprintf("mean = %.3f", overall_mean_r),
+                   vjust = -0.5, hjust = 1, color = "darkgreen", size = 3.5) +
+          coord_cartesian(ylim = c(-1, 1)) +
+          theme_minimal(base_size = 11) +
+          theme(
+            axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 7),
+            panel.grid.major.x = element_blank()
+          ) +
+          labs(
+            title = "Per-sample Pearson r (signed, sorted by r²)",
+            subtitle = "Blue = positive correlation  |  Red = negative correlation (possible encoding error)",
+            x = "Sample",
+            y = "Pearson r"
+          )
+        print(p_samp_r)
+        dev.off()
+      }
     }
   }
 }

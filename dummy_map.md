@@ -124,7 +124,7 @@ echo "Done. Maps saved to ${outdir}/"
 
 ## File Naming Conventions
 
-The QUILT2 pipeline (`quilt2_pipeline.sh`) searches for per-chromosome map files
+The QUILT2 pipeline (`bin/run_quilt2.sh`) searches for per-chromosome map files
 with these naming patterns (in order):
 
 1. `Chr01.map`
@@ -175,7 +175,7 @@ If your VCF uses numeric names (`1`, `2`, ...) but BAMs use `Chr01`, `Chr02`, ..
 Pass the directory containing per-chromosome maps:
 
 ```bash
-bash quilt2_pipeline.sh \
+bash bin/run_quilt2.sh \
     -i /path/to/work_dir \
     --genetic-map /path/to/dummy_map/ \
     --auto-chunk-map \
@@ -185,7 +185,7 @@ bash quilt2_pipeline.sh \
 Or pass a single concatenated map file (less common):
 
 ```bash
-bash quilt2_pipeline.sh \
+bash bin/run_quilt2.sh \
     -i /path/to/work_dir \
     --genetic-map /path/to/single_map.txt \
     --chunk-file chunks.tsv \
