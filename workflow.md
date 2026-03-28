@@ -274,7 +274,7 @@ The dosage evaluation pipeline (`modules/evaluate/dosage_r2.sh`) runs six sequen
 
 ### 5a. Contig Name Normalisation
 
-Both VCFs are inspected for chromosome naming style. If either uses a non-canonical style (e.g., `1`, `chr1`), its contigs are renamed to `ChrNN` using a dynamically-generated renaming map and `bcftools annotate --rename-chrs`. This ensures CHROM values are comparable across both files before any intersection step.
+Both VCFs are inspected for chromosome naming style. If either uses a non-canonical style (e.g., `1`, `chr1`), its contigs are renamed to apple-style `ChrNN` using a dynamically-generated renaming map and `bcftools annotate --rename-chrs`. This ensures CHROM values are comparable across both files before any intersection step.
 
 Supported input styles:
 
@@ -283,6 +283,8 @@ Supported input styles:
 | ChrNN (canonical) | `Chr01` | `Chr01` (no change) |
 | chrN | `chr1` | `Chr01` |
 | N (bare numeric) | `1` | `Chr01` |
+
+Only the canonical apple chromosomes `Chr01`–`Chr17` are carried forward into Stage 5. Non-apple contigs are excluded before overlap, concordance, and metric calculation.
 
 ---
 

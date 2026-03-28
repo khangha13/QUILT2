@@ -70,9 +70,10 @@ Environment:
   BCFTOOLS_MODULE       Module name for bcftools (default: bcftools/1.18-gcc-12.3.0)
 
 Contig Name Handling:
-  The canonical contig style is "ChrNN" (e.g., Chr01, Chr02, Chr17).
+  The canonical contig style is apple "ChrNN" (e.g., Chr01, Chr02, Chr17).
   Supported input styles: "Chr01" (ChrNN), "chr1" (chrN), "1" (N).
   Any VCF using a non-canonical style is automatically renamed to ChrNN.
+  Non-apple contigs are excluded before overlap and metric calculation.
 
 Processing Steps:
   1. Position-only intersection finds common (CHROM, POS) between VCFs.
@@ -406,6 +407,8 @@ if [[ "${BIALLELIC_ONLY}" == "true" ]]; then
     BIALLELIC_ARGS=( -m2 -M2 -v snps )
 fi
 
+APPLE_CONTIG_LIST="Chr01,Chr02,Chr03,Chr04,Chr05,Chr06,Chr07,Chr08,Chr09,Chr10,Chr11,Chr12,Chr13,Chr14,Chr15,Chr16,Chr17"
+
 # =============================================================================
 # HELPER FUNCTIONS (contig normalization, duplicate reporting)
 # =============================================================================
@@ -431,14 +434,14 @@ detect_contig_style() {
 
 build_contig_rename_map() {
     # Build a TSV rename map (OLD<TAB>NEW) from source_style to target_style.
-    # Covers chromosomes 1-22 for generality plus X, Y, M, MT.
+    # Apple-only: maps chromosomes 1..17 to canonical Chr01..Chr17.
     local source_style="$1"
     local target_style="$2"
     local map_file="$3"
 
     : > "${map_file}"
 
-    for i in $(seq 1 22); do
+    for i in $(seq 1 17); do
         local src_name tgt_name
         case "${source_style}" in
             ChrNN) src_name="$(printf 'Chr%02d' "${i}")" ;;
@@ -451,21 +454,6 @@ build_contig_rename_map() {
             chrN)  tgt_name="chr${i}" ;;
             N)     tgt_name="${i}" ;;
             *)     tgt_name="${i}" ;;
-        esac
-        if [[ "${src_name}" != "${tgt_name}" ]]; then
-            printf '%s\t%s\n' "${src_name}" "${tgt_name}" >> "${map_file}"
-        fi
-    done
-
-    for special in X Y M MT; do
-        local src_name tgt_name
-        case "${source_style}" in
-            ChrNN) src_name="Chr${special}" ;; chrN) src_name="chr${special}" ;;
-            N)     src_name="${special}" ;;     *)    src_name="${special}" ;;
-        esac
-        case "${target_style}" in
-            ChrNN) tgt_name="Chr${special}" ;; chrN) tgt_name="chr${special}" ;;
-            N)     tgt_name="${special}" ;;     *)    tgt_name="${special}" ;;
         esac
         if [[ "${src_name}" != "${tgt_name}" ]]; then
             printf '%s\t%s\n' "${src_name}" "${tgt_name}" >> "${map_file}"
@@ -485,6 +473,15 @@ normalize_contigs() {
         log_info "Renaming contigs using map: ${rename_map}"
         run_cmd bcftools annotate --rename-chrs "${rename_map}" "${input_vcf}" -Oz -o "${output_vcf}"
     fi
+    run_cmd bcftools index -f -c "${output_vcf}"
+}
+
+restrict_to_apple_contigs() {
+    # Restrict evaluation to canonical apple chromosomes only.
+    local input_vcf="$1"
+    local output_vcf="$2"
+
+    run_cmd bcftools view -t "${APPLE_CONTIG_LIST}" "${input_vcf}" -Oz -o "${output_vcf}"
     run_cmd bcftools index -f -c "${output_vcf}"
 }
 
@@ -554,13 +551,19 @@ if [[ "${TRUTH_CONTIG_STYLE}" != "${CANONICAL_STYLE}" ]]; then
     fi
 fi
 
+IMPUTED_APPLE_ONLY="${TMP_DIR}/imputed.apple_only.vcf.gz"
+TRUTH_APPLE_ONLY="${TMP_DIR}/truth.apple_only.vcf.gz"
+log_info "Restricting evaluation inputs to canonical apple chromosomes (${APPLE_CONTIG_LIST})"
+restrict_to_apple_contigs "${IMPUTED_NORMALIZED}" "${IMPUTED_APPLE_ONLY}"
+restrict_to_apple_contigs "${TRUTH_NORMALIZED}" "${TRUTH_APPLE_ONLY}"
+
 # --- Step 2: Position-only intersection ---
 log_info "Extracting positions from each VCF (position-only intersection)"
 IMPUTED_POS="${TMP_DIR}/imputed.pos.txt"
 TRUTH_POS="${TMP_DIR}/truth.pos.txt"
 
-bcftools query -f '%CHROM\t%POS\n' "${IMPUTED_NORMALIZED}" | sort -u > "${IMPUTED_POS}"
-bcftools query -f '%CHROM\t%POS\n' "${TRUTH_NORMALIZED}"   | sort -u > "${TRUTH_POS}"
+bcftools query -f '%CHROM\t%POS\n' "${IMPUTED_APPLE_ONLY}" | sort -u > "${IMPUTED_POS}"
+bcftools query -f '%CHROM\t%POS\n' "${TRUTH_APPLE_ONLY}"   | sort -u > "${TRUTH_POS}"
 
 log_info "Finding common positions"
 COMMON_POS="${TMP_DIR}/common.pos.txt"
@@ -590,9 +593,9 @@ IMPUTED_PREDEDUP="${TMP_DIR}/imputed.prededup.vcf.gz"
 TRUTH_PREDEDUP="${TMP_DIR}/truth.prededup.vcf.gz"
 
 run_cmd bcftools view -T "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" \
-    -Oz -o "${IMPUTED_PREDEDUP}" "${IMPUTED_NORMALIZED}"
+    -Oz -o "${IMPUTED_PREDEDUP}" "${IMPUTED_APPLE_ONLY}"
 run_cmd bcftools view -T "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" \
-    -Oz -o "${TRUTH_PREDEDUP}" "${TRUTH_NORMALIZED}"
+    -Oz -o "${TRUTH_PREDEDUP}" "${TRUTH_APPLE_ONLY}"
 run_cmd bcftools index -f -c "${IMPUTED_PREDEDUP}"
 run_cmd bcftools index -f -c "${TRUTH_PREDEDUP}"
 

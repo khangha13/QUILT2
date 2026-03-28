@@ -362,7 +362,7 @@ build_contig_rename_map() {
 
     : > "${map_file}"
 
-    for i in $(seq 1 22); do
+    for i in $(seq 1 17); do
         local src_name tgt_name
         case "${source_style}" in
             ChrNN) src_name="$(printf 'Chr%02d' "${i}")" ;;
@@ -375,25 +375,6 @@ build_contig_rename_map() {
             chrN)  tgt_name="chr${i}" ;;
             N)     tgt_name="${i}" ;;
             *)     tgt_name="${i}" ;;
-        esac
-        if [[ "${src_name}" != "${tgt_name}" ]]; then
-            printf "%s\t%s\n" "${src_name}" "${tgt_name}" >> "${map_file}"
-        fi
-    done
-
-    for special in X Y M MT; do
-        local src_name tgt_name
-        case "${source_style}" in
-            ChrNN) src_name="Chr${special}" ;;
-            chrN)  src_name="chr${special}" ;;
-            N)     src_name="${special}" ;;
-            *)     src_name="${special}" ;;
-        esac
-        case "${target_style}" in
-            ChrNN) tgt_name="Chr${special}" ;;
-            chrN)  tgt_name="chr${special}" ;;
-            N)     tgt_name="${special}" ;;
-            *)     tgt_name="${special}" ;;
         esac
         if [[ "${src_name}" != "${tgt_name}" ]]; then
             printf "%s\t%s\n" "${src_name}" "${tgt_name}" >> "${map_file}"
@@ -412,6 +393,14 @@ normalize_contigs() {
         log_info "Renaming contigs using map: ${rename_map}"
         run_cmd bcftools annotate --rename-chrs "${rename_map}" "${input_vcf}" -Oz -o "${output_vcf}"
     fi
+    run_cmd bcftools index -f -c "${output_vcf}"
+}
+
+restrict_to_apple_contigs() {
+    local input_vcf="$1"
+    local output_vcf="$2"
+
+    run_cmd bcftools view -t "${APPLE_CONTIG_LIST}" "${input_vcf}" -Oz -o "${output_vcf}"
     run_cmd bcftools index -f -c "${output_vcf}"
 }
 
@@ -648,6 +637,7 @@ if [[ -n "${REGION}" ]]; then
 fi
 
 BIALLELIC_ARGS=( -m2 -M2 -v snps )
+APPLE_CONTIG_LIST="Chr01,Chr02,Chr03,Chr04,Chr05,Chr06,Chr07,Chr08,Chr09,Chr10,Chr11,Chr12,Chr13,Chr14,Chr15,Chr16,Chr17"
 
 VCF1_CONTIG_STYLE="$(detect_contig_style "${VCF1}")"
 TRUTH_CONTIG_STYLE="$(detect_contig_style "${TRUTH_VCF}")"
@@ -677,6 +667,12 @@ if [[ "${TRUTH_CONTIG_STYLE}" != "${CANONICAL_STYLE}" ]]; then
     fi
 fi
 
+VCF1_APPLE_ONLY="${TMP_DIR}/vcf1.apple_only.vcf.gz"
+TRUTH_APPLE_ONLY="${TMP_DIR}/truth.apple_only.vcf.gz"
+log_info "Restricting concordance inputs to canonical apple chromosomes (${APPLE_CONTIG_LIST})"
+restrict_to_apple_contigs "${VCF1_NORMALIZED}" "${VCF1_APPLE_ONLY}"
+restrict_to_apple_contigs "${TRUTH_NORMALIZED}" "${TRUTH_APPLE_ONLY}"
+
 if step_done "${VCF1_OVERLAP_OUT}" "${TRUTH_OVERLAP_OUT}" "${VCF1_DUP_REPORT}" "${TRUTH_DUP_REPORT}"; then
     log_info "[SKIP] Overlap/dedup step outputs already exist"
     VCF1_OVERLAPPED_N="$(count_variants "${VCF1_OVERLAP_OUT}")"
@@ -690,8 +686,8 @@ else
     COMMON_POS="${TMP_DIR}/common.positions.tsv"
     SITE_LIST="${TMP_DIR}/common.sites.tsv"
 
-    bcftools query "${REGION_ARGS[@]}" -f '%CHROM\t%POS\n' "${VCF1_NORMALIZED}" | sort -u > "${VCF1_POS}"
-    bcftools query "${REGION_ARGS[@]}" -f '%CHROM\t%POS\n' "${TRUTH_NORMALIZED}" | sort -u > "${TRUTH_POS}"
+    bcftools query "${REGION_ARGS[@]}" -f '%CHROM\t%POS\n' "${VCF1_APPLE_ONLY}" | sort -u > "${VCF1_POS}"
+    bcftools query "${REGION_ARGS[@]}" -f '%CHROM\t%POS\n' "${TRUTH_APPLE_ONLY}" | sort -u > "${TRUTH_POS}"
     comm -12 "${VCF1_POS}" "${TRUTH_POS}" > "${COMMON_POS}"
 
     COMMON_POS_COUNT="$(wc -l < "${COMMON_POS}" | tr -d ' ')"
@@ -707,9 +703,9 @@ else
     TRUTH_OVERLAPPED_TMP="${TMP_DIR}/truth.overlapped.vcf.gz"
 
     run_cmd bcftools view -T "${SITE_LIST}" -S "${VCF1_SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" \
-        -Oz -o "${VCF1_PREDEDUP}" "${VCF1_NORMALIZED}"
+        -Oz -o "${VCF1_PREDEDUP}" "${VCF1_APPLE_ONLY}"
     run_cmd bcftools view -T "${SITE_LIST}" -S "${TRUTH_SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" \
-        -Oz -o "${TRUTH_PREDEDUP}" "${TRUTH_NORMALIZED}"
+        -Oz -o "${TRUTH_PREDEDUP}" "${TRUTH_APPLE_ONLY}"
     run_cmd bcftools index -f -c "${VCF1_PREDEDUP}"
     run_cmd bcftools index -f -c "${TRUTH_PREDEDUP}"
 
