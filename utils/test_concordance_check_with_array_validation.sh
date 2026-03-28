@@ -421,6 +421,33 @@ report_removed_duplicates() {
     } > "${report}"
 }
 
+assert_matching_positions() {
+    local left_vcf="$1"
+    local right_vcf="$2"
+    local left_label="$3"
+    local right_label="$4"
+    local left_pos="${TMP_DIR}/${left_label}.positions.tsv"
+    local right_pos="${TMP_DIR}/${right_label}.positions.tsv"
+    local left_only="${TMP_DIR}/${left_label}.only.positions.tsv"
+    local right_only="${TMP_DIR}/${right_label}.only.positions.tsv"
+
+    bcftools query -f '%CHROM\t%POS\n' "${left_vcf}" | sort -u > "${left_pos}"
+    bcftools query -f '%CHROM\t%POS\n' "${right_vcf}" | sort -u > "${right_pos}"
+    comm -23 "${left_pos}" "${right_pos}" > "${left_only}" || true
+    comm -13 "${left_pos}" "${right_pos}" > "${right_only}" || true
+
+    if [[ -s "${left_only}" || -s "${right_only}" ]]; then
+        log_error "Post-dedup position sets diverged between ${left_label} and ${right_label}"
+        if [[ -s "${left_only}" ]]; then
+            log_error "Example ${left_label}-only position: $(head -1 "${left_only}")"
+        fi
+        if [[ -s "${right_only}" ]]; then
+            log_error "Example ${right_label}-only position: $(head -1 "${right_only}")"
+        fi
+        exit 1
+    fi
+}
+
 build_ab_header() {
     local sample_file="$1"
     local header="CHROM\tPOS\tREF\tALT\tID"
@@ -680,14 +707,24 @@ if step_done "${VCF1_OVERLAP_OUT}" "${TRUTH_OVERLAP_OUT}" "${VCF1_DUP_REPORT}" "
     log_audit_step "overlap_dedup_vcf1" "${VCF1_OVERLAPPED_N}" "${VCF1_OVERLAPPED_N}" "reused existing overlapping VCF1 output"
     log_audit_step "overlap_dedup_truth" "${TRUTH_OVERLAPPED_N}" "${TRUTH_OVERLAPPED_N}" "reused existing overlapping truth output"
 else
+    log_info "Filtering both inputs before position intersection"
+    VCF1_FILTERED="${TMP_DIR}/vcf1.filtered.vcf.gz"
+    TRUTH_FILTERED="${TMP_DIR}/truth.filtered.vcf.gz"
+    run_cmd bcftools view -S "${VCF1_SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" \
+        -Oz -o "${VCF1_FILTERED}" "${VCF1_APPLE_ONLY}"
+    run_cmd bcftools view -S "${TRUTH_SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" \
+        -Oz -o "${TRUTH_FILTERED}" "${TRUTH_APPLE_ONLY}"
+    run_cmd bcftools index -f -c "${VCF1_FILTERED}"
+    run_cmd bcftools index -f -c "${TRUTH_FILTERED}"
+
     log_info "Extracting common positions between VCF1 and truth"
     VCF1_POS="${TMP_DIR}/vcf1.positions.tsv"
     TRUTH_POS="${TMP_DIR}/truth.positions.tsv"
     COMMON_POS="${TMP_DIR}/common.positions.tsv"
     SITE_LIST="${TMP_DIR}/common.sites.tsv"
 
-    bcftools query "${REGION_ARGS[@]}" -f '%CHROM\t%POS\n' "${VCF1_APPLE_ONLY}" | sort -u > "${VCF1_POS}"
-    bcftools query "${REGION_ARGS[@]}" -f '%CHROM\t%POS\n' "${TRUTH_APPLE_ONLY}" | sort -u > "${TRUTH_POS}"
+    bcftools query -f '%CHROM\t%POS\n' "${VCF1_FILTERED}" | sort -u > "${VCF1_POS}"
+    bcftools query -f '%CHROM\t%POS\n' "${TRUTH_FILTERED}" | sort -u > "${TRUTH_POS}"
     comm -12 "${VCF1_POS}" "${TRUTH_POS}" > "${COMMON_POS}"
 
     COMMON_POS_COUNT="$(wc -l < "${COMMON_POS}" | tr -d ' ')"
@@ -702,10 +739,8 @@ else
     VCF1_OVERLAPPED_TMP="${TMP_DIR}/vcf1.overlapped.vcf.gz"
     TRUTH_OVERLAPPED_TMP="${TMP_DIR}/truth.overlapped.vcf.gz"
 
-    run_cmd bcftools view -T "${SITE_LIST}" -S "${VCF1_SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" \
-        -Oz -o "${VCF1_PREDEDUP}" "${VCF1_APPLE_ONLY}"
-    run_cmd bcftools view -T "${SITE_LIST}" -S "${TRUTH_SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" \
-        -Oz -o "${TRUTH_PREDEDUP}" "${TRUTH_APPLE_ONLY}"
+    run_cmd bcftools view -T "${SITE_LIST}" -Oz -o "${VCF1_PREDEDUP}" "${VCF1_FILTERED}"
+    run_cmd bcftools view -T "${SITE_LIST}" -Oz -o "${TRUTH_PREDEDUP}" "${TRUTH_FILTERED}"
     run_cmd bcftools index -f -c "${VCF1_PREDEDUP}"
     run_cmd bcftools index -f -c "${TRUTH_PREDEDUP}"
 
@@ -719,6 +754,7 @@ else
 
     VCF1_OVERLAPPED_N="$(count_variants "${VCF1_OVERLAPPED_TMP}")"
     TRUTH_OVERLAPPED_N="$(count_variants "${TRUTH_OVERLAPPED_TMP}")"
+    assert_matching_positions "${VCF1_OVERLAPPED_TMP}" "${TRUTH_OVERLAPPED_TMP}" "vcf1_dedup" "truth_dedup"
 
     if [[ "${VCF1_PREDEDUP_N}" -ne "${VCF1_OVERLAPPED_N}" ]]; then
         report_removed_duplicates "${VCF1_PREDEDUP}" "${VCF1_OVERLAPPED_TMP}" "${VCF1_DUP_REPORT}" "vcf1"

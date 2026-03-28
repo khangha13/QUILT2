@@ -290,19 +290,23 @@ Only the canonical apple chromosomes `Chr01`–`Chr17` are carried forward into 
 
 ### 5b. Position-Only Overlap
 
-The two normalised VCFs are filtered to their **intersection by (CHROM, POS)** — deliberately ignoring REF and ALT alleles at this stage.
+Before deriving common positions, each normalised VCF is first restricted to the evaluation sample set, optional region, biallelic SNPs, and canonical apple chromosomes. The two filtered VCFs are then reduced to their **intersection by (CHROM, POS)** — deliberately ignoring REF and ALT alleles at this stage.
 
 ```bash
-# Extract sorted CHROM:POS lists from both VCFs
-bcftools query -f '%CHROM\t%POS\n' imputed.vcf.gz | sort -k1,1 -k2,2n > imputed.pos
-bcftools query -f '%CHROM\t%POS\n' truth.vcf.gz   | sort -k1,1 -k2,2n > truth.pos
+# Restrict to the evaluation subset before deriving common positions
+bcftools view -S samples.txt -m2 -M2 -v snps imputed.vcf.gz -Oz -o imputed.filtered.vcf.gz
+bcftools view -S samples.txt -m2 -M2 -v snps truth.vcf.gz   -Oz -o truth.filtered.vcf.gz
+
+# Extract sorted CHROM:POS lists from both filtered VCFs
+bcftools query -f '%CHROM\t%POS\n' imputed.filtered.vcf.gz | sort -k1,1 -k2,2n > imputed.pos
+bcftools query -f '%CHROM\t%POS\n' truth.filtered.vcf.gz   | sort -k1,1 -k2,2n > truth.pos
 
 # Find common positions
 comm -12 imputed.pos truth.pos > common.pos
 
-# Filter each VCF to common positions (targets mode avoids pulling in multi-allelic neighbours)
-bcftools view -T common.pos imputed.vcf.gz -Oz -o imputed.overlap.vcf.gz
-bcftools view -T common.pos truth.vcf.gz   -Oz -o truth.overlap.vcf.gz
+# Filter each already-filtered VCF to common positions
+bcftools view -T common.pos imputed.filtered.vcf.gz -Oz -o imputed.overlap.vcf.gz
+bcftools view -T common.pos truth.filtered.vcf.gz   -Oz -o truth.overlap.vcf.gz
 ```
 
 > **Why position-only?** The REF and ALT alleles may legitimately differ between a WGS-based imputed VCF and an array-based truth VCF (e.g., REF=A in WGS vs REF=G in the array due to different strand or reference conventions). Comparing only by position avoids discarding valid overlapping variants due to apparent REF/ALT mismatches.
@@ -314,15 +318,15 @@ bcftools view -T common.pos truth.vcf.gz   -Oz -o truth.overlap.vcf.gz
 
 ---
 
-### 5c. Biallelic Filter and Deduplication
+### 5c. Deduplication
 
-Each overlapping VCF is filtered to **biallelic SNPs** only, then **deduplicated** to retain a single record per (CHROM, POS):
+Each overlapping filtered VCF is then **deduplicated** to retain a single record per (CHROM, POS):
 
 ```bash
-bcftools view -m2 -M2 -v snps imputed.overlap.vcf.gz | bcftools norm -d snps -Oz -o imputed.biallelic.vcf.gz
+bcftools norm -d snps imputed.overlap.vcf.gz -Oz -o imputed.dedup.vcf.gz
 ```
 
-Multi-allelic positions (where two different ALT alleles are split into separate rows after decomposition) are collapsed to one representative record. Removed duplicates are recorded:
+Multi-allelic positions that still appear as duplicate rows after the side-specific filtering are collapsed to one representative record. Removed duplicates are recorded, and the script asserts that the two post-dedup position sets still match before continuing.
 
 | Report file | Contents |
 |---|---|

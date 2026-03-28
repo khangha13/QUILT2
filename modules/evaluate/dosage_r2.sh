@@ -501,6 +501,31 @@ report_removed_duplicates() {
     } > "${report}"
 }
 
+assert_matching_positions() {
+    # Ensure both VCFs still share the same position set after deduplication.
+    local left_vcf="$1" right_vcf="$2" left_label="$3" right_label="$4"
+    local left_pos="${TMP_DIR}/${left_label}.positions.tsv"
+    local right_pos="${TMP_DIR}/${right_label}.positions.tsv"
+    local left_only="${TMP_DIR}/${left_label}.only.positions.tsv"
+    local right_only="${TMP_DIR}/${right_label}.only.positions.tsv"
+
+    bcftools query -f '%CHROM\t%POS\n' "${left_vcf}" | sort -u > "${left_pos}"
+    bcftools query -f '%CHROM\t%POS\n' "${right_vcf}" | sort -u > "${right_pos}"
+    comm -23 "${left_pos}" "${right_pos}" > "${left_only}" || true
+    comm -13 "${left_pos}" "${right_pos}" > "${right_only}" || true
+
+    if [[ -s "${left_only}" || -s "${right_only}" ]]; then
+        log_error "Post-dedup position sets diverged between ${left_label} and ${right_label}"
+        if [[ -s "${left_only}" ]]; then
+            log_error "Example ${left_label}-only position: $(head -1 "${left_only}")"
+        fi
+        if [[ -s "${right_only}" ]]; then
+            log_error "Example ${right_label}-only position: $(head -1 "${right_only}")"
+        fi
+        exit 1
+    fi
+}
+
 # =============================================================================
 # STEPS 1-3: CONTIG NORMALIZATION → POSITION INTERSECTION → DEDUP
 # =============================================================================
@@ -557,13 +582,23 @@ log_info "Restricting evaluation inputs to canonical apple chromosomes (${APPLE_
 restrict_to_apple_contigs "${IMPUTED_NORMALIZED}" "${IMPUTED_APPLE_ONLY}"
 restrict_to_apple_contigs "${TRUTH_NORMALIZED}" "${TRUTH_APPLE_ONLY}"
 
-# --- Step 2: Position-only intersection ---
+# --- Step 2: Filter each side, then intersect positions ---
+log_info "Filtering both VCFs before position-only intersection"
+IMPUTED_FILTERED="${TMP_DIR}/imputed.filtered.vcf.gz"
+TRUTH_FILTERED="${TMP_DIR}/truth.filtered.vcf.gz"
+run_cmd bcftools view -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" \
+    -Oz -o "${IMPUTED_FILTERED}" "${IMPUTED_APPLE_ONLY}"
+run_cmd bcftools view -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" \
+    -Oz -o "${TRUTH_FILTERED}" "${TRUTH_APPLE_ONLY}"
+run_cmd bcftools index -f -c "${IMPUTED_FILTERED}"
+run_cmd bcftools index -f -c "${TRUTH_FILTERED}"
+
 log_info "Extracting positions from each VCF (position-only intersection)"
 IMPUTED_POS="${TMP_DIR}/imputed.pos.txt"
 TRUTH_POS="${TMP_DIR}/truth.pos.txt"
 
-bcftools query -f '%CHROM\t%POS\n' "${IMPUTED_APPLE_ONLY}" | sort -u > "${IMPUTED_POS}"
-bcftools query -f '%CHROM\t%POS\n' "${TRUTH_APPLE_ONLY}"   | sort -u > "${TRUTH_POS}"
+bcftools query -f '%CHROM\t%POS\n' "${IMPUTED_FILTERED}" | sort -u > "${IMPUTED_POS}"
+bcftools query -f '%CHROM\t%POS\n' "${TRUTH_FILTERED}"   | sort -u > "${TRUTH_POS}"
 
 log_info "Finding common positions"
 COMMON_POS="${TMP_DIR}/common.pos.txt"
@@ -593,9 +628,9 @@ IMPUTED_PREDEDUP="${TMP_DIR}/imputed.prededup.vcf.gz"
 TRUTH_PREDEDUP="${TMP_DIR}/truth.prededup.vcf.gz"
 
 run_cmd bcftools view -T "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" \
-    -Oz -o "${IMPUTED_PREDEDUP}" "${IMPUTED_APPLE_ONLY}"
+    -Oz -o "${IMPUTED_PREDEDUP}" "${IMPUTED_FILTERED}"
 run_cmd bcftools view -T "${SITE_LIST}" -S "${SAMPLE_SET}" "${REGION_ARGS[@]}" "${BIALLELIC_ARGS[@]}" \
-    -Oz -o "${TRUTH_PREDEDUP}" "${TRUTH_APPLE_ONLY}"
+    -Oz -o "${TRUTH_PREDEDUP}" "${TRUTH_FILTERED}"
 run_cmd bcftools index -f -c "${IMPUTED_PREDEDUP}"
 run_cmd bcftools index -f -c "${TRUTH_PREDEDUP}"
 
@@ -614,6 +649,7 @@ run_cmd bcftools index -f -c "${TRUTH_OVERLAPPED}"
 IMPUTED_OVERLAPPED_N="$(bcftools view -H "${IMPUTED_OVERLAPPED}" | wc -l | tr -d ' ')"
 TRUTH_OVERLAPPED_N="$(bcftools view -H "${TRUTH_OVERLAPPED}" | wc -l | tr -d ' ')"
 log_info "Variants after dedup: imputed=${IMPUTED_OVERLAPPED_N}, truth=${TRUTH_OVERLAPPED_N}"
+assert_matching_positions "${IMPUTED_OVERLAPPED}" "${TRUTH_OVERLAPPED}" "imputed_dedup" "truth_dedup"
 
 # Record which positions were removed as duplicates.
 if [[ "${IMPUTED_PREDEDUP_N}" -ne "${IMPUTED_OVERLAPPED_N}" ]]; then
