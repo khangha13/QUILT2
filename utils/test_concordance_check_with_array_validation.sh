@@ -6,7 +6,8 @@
 # Matches samples from a nucleotide VCF/BCF (--vcf1) against samples from a
 # truth/array VCF/BCF (--truth/--vcf) using the same overlap and imputed-side
 # A/B harmonisation strategy as modules/evaluate/dosage_r2.sh. The truth VCF
-# is expected to already be encoded in A/B format.
+# is expected to be array-coded such that GT index 0 means A and GT index 1
+# means B; REF/ALT are retained for QC/filtering, not for truth GT decoding.
 #
 # Outputs are Quarto-friendly TSVs plus intermediate VCF/TSV artifacts for
 # download and audit.
@@ -33,8 +34,8 @@ Usage:
 
 Required:
   --vcf1 PATH             Query VCF/BCF with standard nucleotide alleles.
-  --truth PATH            Truth/array VCF/BCF already encoded in A/B format
-                          (REF/ALT in {A,B}; GT used as reference).
+  --truth PATH            Truth/array VCF/BCF using array A/B genotype coding
+                          (GT index 0 -> A, 1 -> B; REF/ALT kept for QC).
   --vcf PATH              Alias for --truth.
 
 Optional:
@@ -551,7 +552,7 @@ NR == 1 { print; next }
 }' > "${output_tsv}"
 }
 
-validate_truth_vcf_ab() {
+decode_truth_vcf_ab() {
     local input_vcf="$1"
     local sample_file="$2"
     local output_tsv="$3"
@@ -565,24 +566,11 @@ validate_truth_vcf_ab() {
     } | awk -F'\t' -v exc_file="${exception_tmp}" '
 BEGIN { OFS = "\t" }
 
-function is_ab_allele(base) {
-    return (base == "A" || base == "B")
-}
-
 NR == 1 { print; next }
 
 {
     ref = $3
     alt = $4
-
-    if (!is_ab_allele(ref) || !is_ab_allele(alt) || ref == alt) {
-        print $1, $2, ref, alt, "site_qc", ".", "truth_ref_alt_must_be_distinct_A_or_B" >> exc_file
-        for (i = 6; i <= NF; i++) {
-            $i = "./."
-        }
-        print
-        next
-    }
 
     for (i = 6; i <= NF; i++) {
         gt = $i
@@ -606,13 +594,13 @@ NR == 1 { print; next }
 
         a1 = ""
         a2 = ""
-        if      (idx[1] == "0") a1 = ref
-        else if (idx[1] == "1") a1 = alt
+        if      (idx[1] == "0") a1 = "A"
+        else if (idx[1] == "1") a1 = "B"
         else if (idx[1] == ".") { $i = "./."; continue }
         else { print $1, $2, ref, alt, "sample_col=" i, gt >> exc_file; $i = "./."; continue }
 
-        if      (idx[2] == "0") a2 = ref
-        else if (idx[2] == "1") a2 = alt
+        if      (idx[2] == "0") a2 = "A"
+        else if (idx[2] == "1") a2 = "B"
         else if (idx[2] == ".") { $i = "./."; continue }
         else { print $1, $2, ref, alt, "sample_col=" i, gt >> exc_file; $i = "./."; continue }
 
@@ -637,9 +625,9 @@ write_output_manifest() {
     add_manifest_row "pairwise_concordance" "${PAIRWISE_TSV}" "Tidy all-vs-all sample concordance table"
     add_manifest_row "pipeline_audit" "${PIPELINE_AUDIT_LOG}" "Per-step counts for QC and Quarto reporting"
     add_manifest_row "vcf1_ab_tsv" "${VCF1_AB_TSV}" "VCF1 genotypes translated into A/B format"
-    add_manifest_row "truth_ab_tsv" "${TRUTH_AB_TSV}" "Truth genotypes decoded from an existing A/B truth VCF"
+    add_manifest_row "truth_ab_tsv" "${TRUTH_AB_TSV}" "Truth genotypes decoded from array A/B genotype indices"
     add_manifest_row "vcf1_translation_exceptions" "${VCF1_EXCEPTION_REPORT}" "VCF1 translation exceptions encountered during A/B conversion"
-    add_manifest_row "truth_translation_exceptions" "${TRUTH_EXCEPTION_REPORT}" "Truth A/B QC exceptions encountered while validating the truth VCF"
+    add_manifest_row "truth_translation_exceptions" "${TRUTH_EXCEPTION_REPORT}" "Truth genotype decode exceptions encountered while converting array A/B indices"
     add_manifest_row "duplicates_removed_vcf1" "${VCF1_DUP_REPORT}" "Duplicate loci removed from the VCF1 overlap set"
     add_manifest_row "duplicates_removed_truth" "${TRUTH_DUP_REPORT}" "Duplicate loci removed from the truth overlap set"
     add_manifest_row "ambiguous_loci_removed" "${AMBIG_REPORT}" "Strand-ambiguous loci removed from both inputs"
@@ -839,7 +827,7 @@ if step_done "${VCF1_AB_TSV}" "${TRUTH_AB_TSV}" "${VCF1_EXCEPTION_REPORT}" "${TR
     VCF1_AB_N="$(count_table_rows "${VCF1_AB_TSV}")"
     TRUTH_AB_N="$(count_table_rows "${TRUTH_AB_TSV}")"
     log_audit_step "ab_translate_vcf1" "${VCF1_AB_N}" "${VCF1_AB_N}" "reused existing VCF1 A/B translation output"
-    log_audit_step "ab_validate_truth" "${TRUTH_AB_N}" "${TRUTH_AB_N}" "reused existing truth A/B validation output"
+    log_audit_step "ab_decode_truth" "${TRUTH_AB_N}" "${TRUTH_AB_N}" "reused existing truth A/B decode output"
 else
     log_info "Preparing A/B genotype tables"
     VCF1_EXCEPTION_TMP="${TMP_DIR}/vcf1.translation_exceptions.tmp.tsv"
@@ -848,7 +836,7 @@ else
     : > "${TRUTH_EXCEPTION_TMP}"
 
     translate_query_vcf_to_ab "${VCF1_UNAMBIG_OUT}" "${VCF1_SAMPLE_SET}" "${VCF1_AB_TSV}" "${VCF1_EXCEPTION_TMP}"
-    validate_truth_vcf_ab "${TRUTH_UNAMBIG_OUT}" "${TRUTH_SAMPLE_SET}" "${TRUTH_AB_TSV}" "${TRUTH_EXCEPTION_TMP}"
+    decode_truth_vcf_ab "${TRUTH_UNAMBIG_OUT}" "${TRUTH_SAMPLE_SET}" "${TRUTH_AB_TSV}" "${TRUTH_EXCEPTION_TMP}"
 
     finalize_exception_report "${VCF1_EXCEPTION_TMP}" "${VCF1_EXCEPTION_REPORT}"
     finalize_exception_report "${TRUTH_EXCEPTION_TMP}" "${TRUTH_EXCEPTION_REPORT}"
@@ -859,7 +847,7 @@ else
     TRUTH_AB_N="$(count_table_rows "${TRUTH_AB_TSV}")"
 
     log_audit_step "ab_translate_vcf1" "${VCF1_UNAMBIG_N}" "${VCF1_AB_N}" "VCF1 translated to A/B genotype space"
-    log_audit_step "ab_validate_truth" "${TRUTH_UNAMBIG_N}" "${TRUTH_AB_N}" "truth validated and decoded from existing A/B genotype space"
+    log_audit_step "ab_decode_truth" "${TRUTH_UNAMBIG_N}" "${TRUTH_AB_N}" "truth decoded from array A/B genotype indices"
 fi
 
 PAIRWISE_R_SCRIPT="${TMP_DIR}/pairwise_concordance.R"

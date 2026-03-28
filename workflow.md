@@ -245,7 +245,7 @@ tabix -p vcf imputed.Chr01.vcf.gz
 Stage 5 currently has two entry points:
 
 - `bin/dosage_r2_sbatch.sh` → `modules/evaluate/dosage_r2.sh` for dosage r², concordance, and diagnostic plots.
-- `utils/test_concordance_check_with_array_validation.sh` for Quarto-ready all-vs-all concordance matching between a nucleotide query VCF and an already A/B-encoded array truth VCF.
+- `utils/test_concordance_check_with_array_validation.sh` for Quarto-ready all-vs-all concordance matching between a nucleotide query VCF and an array truth VCF whose GT indices encode A/B genotype classes.
 
 ### How to Submit
 
@@ -266,7 +266,7 @@ bash bin/dosage_r2_sbatch.sh \
   -- --samples sample_list.txt --use-vcfpp --no-parquet
 ```
 
-The evaluation truth VCF is expected to already be encoded in harmonised A/B format before it enters Stage 5. Raw vendor A/B exports are not translated here.
+The evaluation truth VCF is expected to use array-style genotype coding where GT index `0` means allele `A` and GT index `1` means allele `B`. The truth-side decoder does not derive A/B labels from truth REF/ALT nucleotides.
 
 The dosage evaluation pipeline (`modules/evaluate/dosage_r2.sh`) runs six sequential steps, each with a **skip-check**: if the output files for a step already exist, the step is skipped automatically. Use `--force` to override all skip-checks.
 
@@ -357,7 +357,7 @@ These "strand-ambiguous" loci cannot be reliably classified as A-group or B-grou
 
 ### 5e. A/B Format Translation
 
-The imputed VCF is translated into a unified A/B genotype format. The truth VCF is already expected to be in that harmonised A/B space, so this step only performs QC validation on the truth alleles before decoding GT indices.
+The imputed VCF is translated into a unified A/B genotype format. The truth VCF is decoded using array genotype indices, so truth GTs are mapped directly from index codes to `A/A`, `A/B`, `B/A`, and `B/B`.
 
 #### The Rule
 
@@ -387,23 +387,26 @@ This produces:
 
 For the truth VCF:
 
-- `REF` and `ALT` must already be distinct values in `{A, B}`.
-- GT indices are decoded directly to `A/A`, `A/B`, `B/A`, or `B/B`.
-- If a truth row fails the A/B allele QC, it is written to the exception report and emitted with missing genotypes rather than being retranslated from nucleotide alleles.
+- GT indices are decoded directly as array genotype classes:
+  - `0/0 -> A/A`
+  - `0/1 -> A/B`
+  - `1/0 -> B/A`
+  - `1/1 -> B/B`
+- Truth `REF` and `ALT` are retained for filtering, position matching, and strand-ambiguity QC, but they are not used to derive truth A/B genotype labels.
 
-This means Stage 5 assumes the array truth has already been harmonised upstream into the same A/B space used for downstream dosage comparison.
+This means Stage 5 assumes the array truth GT field already follows the A/B genotype-class convention used by the original pipeline.
 
 #### Exception Handling
 
 - Missing genotypes (`./. or .|.`) are recorded as `./.` in the output and are **not** treated as exceptions.
 - Any imputed GT that cannot be parsed, or whose decoded nucleotide is not in `{A, T, C, G}`, is set to `./.` and recorded in `{prefix}.translation_exceptions.tsv`.
-- Any truth row whose alleles are not distinct `{A, B}` values is recorded as a truth QC exception in `{prefix}.translation_exceptions.tsv` and emitted with missing genotypes.
+- Any truth GT containing unsupported allele indices is recorded in `{prefix}.translation_exceptions.tsv` and emitted with missing genotypes.
 
 **Checkpoint outputs:**
 
 - `{prefix}.imputed.AB_format.tsv` — tab-separated: CHROM, POS, REF, ALT, ID, then one column per sample with A/A, A/B, or B/B genotypes.
-- `{prefix}.truth.AB_format.tsv` — same tabular layout, decoded directly from the already A/B-encoded truth VCF.
-- `{prefix}.translation_exceptions.tsv` — imputed translation exceptions plus truth A/B QC exceptions.
+- `{prefix}.truth.AB_format.tsv` — same tabular layout, decoded from the array truth GT index classes.
+- `{prefix}.translation_exceptions.tsv` — imputed translation exceptions plus truth GT decode exceptions.
 
 ---
 
@@ -481,12 +484,12 @@ bash utils/test_concordance_check_with_array_validation.sh \
 This utility expects:
 
 - `--vcf1`: a standard nucleotide VCF/BCF.
-- `--truth` or `--vcf`: an already harmonised A/B truth VCF/BCF.
+- `--truth` or `--vcf`: an array truth VCF/BCF whose GT indices encode A/B genotype classes.
 
 It reuses the same overlap, deduplication, and strand-ambiguity filtering model as `dosage_r2.sh`, then:
 
 1. translates only the query-side VCF into A/B genotype space,
-2. validates and decodes the truth-side A/B VCF without attempting nucleotide translation,
+2. decodes the truth-side array GT indices into A/B genotype classes without using truth REF/ALT for genotype translation,
 3. computes all-vs-all pairwise genotype concordance across every `vcf1_sample × truth_sample` pair,
 4. ranks the best and second-best truth match for each query sample.
 
@@ -503,7 +506,7 @@ Downloadable intermediate outputs include:
 - query and truth A/B TSVs,
 - duplicate-removal reports,
 - ambiguous-loci report,
-- query translation exceptions and truth A/B QC exceptions.
+- query translation exceptions and truth GT decode exceptions.
 
 ---
 
