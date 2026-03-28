@@ -29,16 +29,19 @@ if command -v module >/dev/null 2>&1; then
 fi
 
 ensure_bcftools() {
-    # Load bcftools if absent; uses BCFTOOLS_MODULE default from orchestrator
+    # Load bcftools if absent; prefer BCFTOOLS_MODULE but fall back to the
+    # cluster-safe default used elsewhere in the pipeline.
+    local bcftools_module="${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}"
+
     if command -v bcftools >/dev/null 2>&1; then
         return 0
     fi
     if command -v module >/dev/null 2>&1; then
-        if [[ -n "${BCFTOOLS_MODULE:-}" ]]; then
-            if module load "${BCFTOOLS_MODULE}"; then
-                log_info "Loaded ${BCFTOOLS_MODULE} module for bcftools"
+        if [[ -n "${bcftools_module}" ]]; then
+            if module load "${bcftools_module}"; then
+                log_info "Loaded ${bcftools_module} module for bcftools"
             else
-                log_warn "Failed to load ${BCFTOOLS_MODULE}; bcftools still unavailable"
+                log_warn "Failed to load ${bcftools_module}; bcftools still unavailable"
             fi
         else
             log_warn "BCFTOOLS_MODULE not set; cannot auto-load bcftools."
@@ -48,7 +51,7 @@ ensure_bcftools() {
     fi
 
     if ! command -v bcftools >/dev/null 2>&1; then
-        log_error "bcftools not found in PATH. Install it or load module ${BCFTOOLS_MODULE:-<unset>}."
+        log_error "bcftools not found in PATH. Install it or load module ${bcftools_module:-<unset>}."
         return 1
     fi
 }
