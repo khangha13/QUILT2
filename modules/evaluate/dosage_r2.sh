@@ -11,11 +11,12 @@
 #   2. Find overlapping positions (CHROM + POS) between imputed and truth VCFs
 #   3. Deduplicate multi-allelic positions (bcftools norm -d snps)
 #   4. Remove strand-ambiguous (A/T, T/A, C/G, G/C) loci
-#   5. Translate both VCFs to A/B format using the SAME nucleotide-based rule:
-#        Decode GT index → actual nucleotide (using REF/ALT), then group:
+#   5. Translate the imputed VCF to A/B format and validate/pass through the
+#      truth VCF as already A/B encoded:
+#        Imputed: decode GT index → nucleotide (using REF/ALT), then group:
 #          {A,T} → A  |  {C,G} → B
-#        Both VCFs use this identical rule, so a biologically identical genotype
-#        always yields the same dosage value regardless of REF/ALT orientation.
+#        Truth: REF/ALT must already be in {A,B}; GT indices are decoded
+#        directly to A/B without nucleotide regrouping.
 #   6. Feed A/B genotype TSVs to R for r², concordance, and plots
 #
 # Dosages are derived from GT fields only; DS/GP tags are not used.
@@ -47,7 +48,8 @@ Usage: dosage_r2.sh --imputed <imputed.vcf.gz> --truth <truth.vcf.gz> --out-pref
 
 Required:
   --imputed PATH        Imputed VCF/BCF (raw WGS-style genotypes)
-  --truth PATH          Truth VCF/BCF (array genotypes; GT used as reference)
+  --truth PATH          Truth VCF/BCF already encoded in A/B format; GT used
+                        as reference
   --out-prefix PREFIX   Output prefix for metrics/plots (e.g., results/dosage_eval)
 
 Options:
@@ -81,14 +83,12 @@ Processing Steps:
   2. Multi-allelic positions (decomposed into biallelic rows) are deduplicated.
   3. Strand-ambiguous loci (REF/ALT = A/T, T/A, C/G, G/C) are removed because
      they cannot be reliably assigned to the A or B allele class.
-  4. Both VCFs are translated to A/B format using the SAME nucleotide-based rule:
+  4. The imputed VCF is translated to A/B format using:
        GT index 0 → REF nucleotide, index 1 → ALT nucleotide; then:
          {A,T} → A, {C,G} → B
        So: both-AT → A/A | one AT + one CG → A/B | both-CG → B/B
-       Special case: if REF/ALT are already A/B labels (pre-encoded array data),
-       the allele letters are passed through directly without re-grouping.
-       Using the same rule for both VCFs ensures that a biologically identical
-       genotype always maps to the same dosage regardless of REF/ALT orientation.
+     The truth VCF must already be encoded in A/B format; its GT indices are
+     decoded directly to A/B labels after QC validation of REF/ALT.
   5. A/B dosages (A/A=0, A/B=1, B/B=2) are compared to compute r² and concordance.
 
 Skip Checks:
@@ -111,7 +111,7 @@ Outputs (PREFIX.*):
   ambiguous_loci_removed.tsv                  Strand-ambiguous positions that were removed
   imputed.AB_format.tsv                       Imputed genotypes in A/B format
   truth.AB_format.tsv                         Truth genotypes in A/B format
-  translation_exceptions.tsv                  Unexpected GTs found during translation (if any)
+  translation_exceptions.tsv                  Unexpected GTs or truth A/B QC issues (if any)
   metrics.tsv                                 Per-variant r², concordance, MAF
   per_sample_metrics.tsv                      Per-sample r², concordance, variant count
   summary.tsv                                 Overall summary statistics
@@ -731,7 +731,7 @@ log_step_done "unambiguous" \
 fi  # end Step 4 skip-check
 
 # =============================================================================
-# STEP 5: TRANSLATE BOTH VCFs TO A/B FORMAT
+# STEP 5: PREPARE IMPUTED A/B TSV AND VALIDATE TRUTH A/B TSV
 # =============================================================================
 # Skip if A/B format TSVs already exist from a previous run.
 
@@ -741,7 +741,8 @@ if step_done "${IMPUTED_AB_TSV}" "${TRUTH_AB_TSV}"; then
     log_info "  ${TRUTH_AB_TSV}"
 else
 
-# Both VCFs are converted to a common A/B genotype representation:
+# The imputed VCF is translated into A/B genotype space, while the truth VCF is
+# expected to already use A/B alleles and is only QC-validated before GT decode.
 #
 # --- IMPUTED VCF (nucleotide-based translation) ---
 # For each variant, the GT allele indices (0 = REF, 1 = ALT) are decoded back
@@ -764,16 +765,10 @@ else
 #   - Heterozygous:   always A/B (one from each group)
 #   - Homozygous ALT: if ALT∈{A,T} → A/A; if ALT∈{C,G} → B/B
 #
-# --- TRUTH VCF (decode to A/B) ---
-# Two supported truth encodings:
-#   1) Standard nucleotide alleles (REF/ALT in A/C/G/T): decode GT→nucleotides
-#      then apply the same AT/CG grouping as the imputed VCF.
-#   2) Pre-encoded A/B alleles (REF/ALT in {A,B}): decode GT indices directly
-#      to A/B letters (this is useful if your array-derived truth has already
-#      been converted to an A/B allele representation upstream).
-#
-# In both cases, heterozygotes may appear as A/B or B/A; downstream code treats
-# them equivalently.
+# --- TRUTH VCF (already A/B) ---
+# The truth VCF must already use REF/ALT in {A,B}. QC in this step validates
+# that contract and decodes GT indices directly to A/B letters. Rows that fail
+# the A/B allele QC are recorded as exceptions and emitted with missing GTs.
 
 # Build the TSV header (shared by both A/B files).
 readarray -t SAMPLE_ORDER < "${SAMPLE_SET}"
@@ -856,8 +851,8 @@ NR == 1 { print; next }
 IMPUTED_AB_N="$(( $(wc -l < "${IMPUTED_AB_TSV}" | tr -d ' ') - 1 ))"
 log_info "Imputed A/B format: ${IMPUTED_AB_N} variants written to ${IMPUTED_AB_TSV}"
 
-# --- Truth A/B translation ---
-log_info "Translating truth VCF to A/B format"
+# --- Truth A/B validation/pass-through ---
+log_info "Validating truth VCF and decoding existing A/B genotypes"
 TRUTH_EXCEPTIONS="${TMP_DIR}/truth_exceptions.tsv"
 
 {
@@ -867,10 +862,8 @@ TRUTH_EXCEPTIONS="${TMP_DIR}/truth_exceptions.tsv"
 } | awk -F'\t' -v exc_file="${TRUTH_EXCEPTIONS}" '
 BEGIN { OFS = "\t" }
 
-function nuc_group(base) {
-    if (base == "A" || base == "T") return "A"
-    if (base == "C" || base == "G") return "B"
-    return "?"
+function is_ab_allele(base) {
+    return (base == "A" || base == "B")
 }
 
 NR == 1 { print; next }
@@ -879,27 +872,14 @@ NR == 1 { print; next }
     ref = $3
     alt = $4
 
-    # Detect whether this row is already in A/B encoding (pre-processed array data)
-    # rather than standard nucleotide alleles (A/C/G/T).
-    #
-    # This check is safe under two pipeline assumptions that must hold together:
-    #
-    # Assumption 1 — "B" is not a valid IUPAC nucleotide allele.
-    #   A standard VCF will never have REF or ALT equal to "B".
-    #   Therefore, if either allele is "B", the row must be from a pre-encoded
-    #   A/B truth file, and the GT indices (0,1) map directly to "A" or "B"
-    #   without needing nucleotide-to-group translation.
-    #
-    # Assumption 2 — Strand-ambiguous loci were removed in Step 4.
-    #   After Step 4, every remaining nucleotide variant has one allele from
-    #   {A,T} and one from {C,G}.  No such pair can have BOTH alleles within
-    #   {"A","B"} (e.g. REF=A, ALT=C: REF matches but ALT "C" does not).
-    #   This means the check cannot accidentally fire on a real nucleotide VCF,
-    #   even though "A" is both a nucleotide and an A/B-group label.
-    #
-    # If either assumption is violated upstream, this detection will silently
-    # misclassify rows — add an explicit --truth-is-ab flag if that becomes a risk.
-    is_ab_alleles = ((ref == "A" || ref == "B") && (alt == "A" || alt == "B"))
+    if (!is_ab_allele(ref) || !is_ab_allele(alt) || ref == alt) {
+        print $1, $2, ref, alt, "site_qc", ".", "truth_ref_alt_must_be_distinct_A_or_B" >> exc_file
+        for (i = 6; i <= NF; i++) {
+            $i = "./."
+        }
+        print
+        next
+    }
 
     for (i = 6; i <= NF; i++) {
         gt = $i
@@ -923,20 +903,7 @@ NR == 1 { print; next }
         else if (idx[2] == ".") { $i = "./."; continue }
         else { print $1, $2, ref, alt, "sample_col=" i, gt >> exc_file; $i = "./."; continue }
 
-        if (is_ab_alleles) {
-            $i = a1 sep a2
-            continue
-        }
-
-        g1 = nuc_group(a1)
-        g2 = nuc_group(a2)
-        if (g1 == "?" || g2 == "?") {
-            print $1, $2, ref, alt, "sample_col=" i, gt, a1, a2 >> exc_file
-            $i = "./."
-            continue
-        }
-
-        $i = g1 sep g2
+        $i = a1 sep a2
     }
 
     print
@@ -960,9 +927,9 @@ if [[ -s "${IMPUTED_EXCEPTIONS}" || -s "${TRUTH_EXCEPTIONS}" ]]; then
     } > "${EXCEPTION_REPORT}"
 
     EXCEPTION_COUNT="$(( $(wc -l < "${EXCEPTION_REPORT}" | tr -d ' ') - 1 ))"
-    log_warn "${EXCEPTION_COUNT} translation exception(s) recorded in: ${EXCEPTION_REPORT}"
+    log_warn "${EXCEPTION_COUNT} A/B preparation exception(s) recorded in: ${EXCEPTION_REPORT}"
 else
-    log_info "No translation exceptions found"
+    log_info "No A/B preparation exceptions found"
 fi
 
 log_step_done "ab_translate" \

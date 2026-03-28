@@ -1,7 +1,7 @@
 # QUILT2 Imputation Pipeline — Detailed Workflow
 
 > **Visual overview:** `workflow_diagram.html` in the repository root renders an interactive metromap diagram.
-> **Evaluation sub-pipeline:** `modules/evaluate/dosage_r2.sh` → `modules/evaluate/dosage_r2.R`
+> **Evaluation tools:** `modules/evaluate/dosage_r2.sh` → `modules/evaluate/dosage_r2.R`, plus `utils/test_concordance_check_with_array_validation.sh` for sample-identity matching against array truth.
 
 ---
 
@@ -20,6 +20,7 @@
    - [5d. Strand-Ambiguous Loci Removal](#5d-strand-ambiguous-loci-removal)
    - [5e. A/B Format Translation](#5e-ab-format-translation)
    - [5f. R Metrics and Plots](#5f-r-metrics-and-plots)
+   - [5g. Standalone Concordance Check for Array Validation](#5g-standalone-concordance-check-for-array-validation)
 8. [Configuration](#8-configuration)
 9. [How to Run](#9-how-to-run)
 10. [Output Files](#10-output-files)
@@ -38,7 +39,7 @@ The pipeline has five stages:
 | 2 | Chunk Definition | `bin/run_quilt2.sh` | Local / inline | Mandatory |
 | 3 | Reference Preparation | `templates/quilt2_nomiss_job.sh` | Array per chunk | Mandatory |
 | 4 | Imputation + Concat | `templates/quilt2_job.sh` | Array per chunk | Mandatory |
-| 5 | Evaluation | `bin/dosage_r2_sbatch.sh` → `modules/evaluate/dosage_r2.sh` | Single job | Optional |
+| 5 | Evaluation | `bin/dosage_r2_sbatch.sh` → `modules/evaluate/dosage_r2.sh`, or `utils/test_concordance_check_with_array_validation.sh` | Single job / local utility | Optional |
 
 Stages 3 and 4 run as a **single SLURM array** where each task processes one chunk of one chromosome. Stage 1 runs as a separate SLURM array over chromosomes. Stage 5 runs as a single SLURM job.
 
@@ -51,6 +52,8 @@ QUILT2_Pipeline_KH_v1/
 ├── bin/
 │   ├── run_quilt2.sh          # Main orchestrator (submit master + array jobs)
 │   └── dosage_r2_sbatch.sh    # Evaluation SLURM submit wrapper
+├── utils/
+│   └── test_concordance_check_with_array_validation.sh  # Standalone all-vs-all sample concordance utility
 ├── config/
 │   ├── environment.template.sh  # Copy to environment.sh and fill in paths
 │   ├── environment.sh           # (user-created, not committed)
@@ -237,7 +240,12 @@ tabix -p vcf imputed.Chr01.vcf.gz
 
 **Script:** `bin/dosage_r2_sbatch.sh` → `modules/evaluate/dosage_r2.sh` → `modules/evaluate/dosage_r2.R`
 **Execution:** Single SLURM job
-**Purpose:** Compare the imputed VCF against a high-depth truth VCF (e.g., SNP array data) to quantify imputation accuracy.
+**Purpose:** Compare the imputed VCF against a harmonised truth VCF to quantify imputation accuracy, and optionally perform all-vs-all sample identity matching when the array and sequencing sample names differ.
+
+Stage 5 currently has two entry points:
+
+- `bin/dosage_r2_sbatch.sh` → `modules/evaluate/dosage_r2.sh` for dosage r², concordance, and diagnostic plots.
+- `utils/test_concordance_check_with_array_validation.sh` for Quarto-ready all-vs-all concordance matching between a nucleotide query VCF and an already A/B-encoded array truth VCF.
 
 ### How to Submit
 
@@ -258,7 +266,9 @@ bash bin/dosage_r2_sbatch.sh \
   -- --samples sample_list.txt --use-vcfpp --no-parquet
 ```
 
-The evaluation pipeline (`modules/evaluate/dosage_r2.sh`) runs six sequential steps, each with a **skip-check**: if the output files for a step already exist, the step is skipped automatically. Use `--force` to override all skip-checks.
+The evaluation truth VCF is expected to already be encoded in harmonised A/B format before it enters Stage 5. Raw vendor A/B exports are not translated here.
+
+The dosage evaluation pipeline (`modules/evaluate/dosage_r2.sh`) runs six sequential steps, each with a **skip-check**: if the output files for a step already exist, the step is skipped automatically. Use `--force` to override all skip-checks.
 
 ---
 
@@ -341,11 +351,11 @@ These "strand-ambiguous" loci cannot be reliably classified as A-group or B-grou
 
 ### 5e. A/B Format Translation
 
-Both VCFs are translated to a **unified A/B genotype format** using **the same nucleotide-based rule**, implemented in `awk`:
+The imputed VCF is translated into a unified A/B genotype format. The truth VCF is already expected to be in that harmonised A/B space, so this step only performs QC validation on the truth alleles before decoding GT indices.
 
 #### The Rule
 
-Each GT index is first decoded to its actual nucleotide using the variant's REF and ALT columns:
+For the imputed VCF, each GT index is first decoded to its actual nucleotide using the variant's REF and ALT columns:
 
 ```
 index 0 → REF nucleotide
@@ -367,31 +377,27 @@ This produces:
 | One {A,T} + one {C,G} | A/B | 1 |
 | Both in {C, G} | B/B | 2 |
 
-#### Why the Same Rule for Both VCFs?
+#### Truth VCF Handling
 
-Because the rule operates on **decoded nucleotides**, not on which allele is labelled REF, the same biological genotype always maps to the same A/B value — regardless of whether the imputed VCF and truth VCF assign the same nucleotide as REF or ALT.
+For the truth VCF:
 
-**Example:** a sample that is biologically GG at a locus:
+- `REF` and `ALT` must already be distinct values in `{A, B}`.
+- GT indices are decoded directly to `A/A`, `A/B`, `B/A`, or `B/B`.
+- If a truth row fails the A/B allele QC, it is written to the exception report and emitted with missing genotypes rather than being retranslated from nucleotide alleles.
 
-| VCF | REF | ALT | GT index | Decoded nucleotide | A/B | Dosage |
-|---|---|---|---|---|---|---|
-| Imputed | A | G | 1/1 | G/G | B/B | 2 |
-| Truth | G | A | 0/0 | G/G | B/B | 2 |
-
-Both yield dosage 2 — consistent, no post-hoc correction needed.
-
-> **Historical note:** An earlier version of the pipeline used index-based translation for the truth VCF (0→A, 1→B) while using nucleotide-based for the imputed VCF. This caused dosages to be perfectly anti-correlated for variants where the array REF allele belonged to the CG group. A band-aid `align_dosage_direction()` function was added to flip such variants; this was later recognised as dangerous (it could also flip genuinely poorly-imputed variants) and was **removed** in favour of the correct fix: applying the same nucleotide-based rule to both VCFs.
+This means Stage 5 assumes the array truth has already been harmonised upstream into the same A/B space used for downstream dosage comparison.
 
 #### Exception Handling
 
-- Missing genotypes (`./. or .|.`) are recorded as `./. ` in the output and are **not** treated as exceptions.
-- Any GT that cannot be parsed or whose decoded nucleotide is not in {A, T, C, G} is set to `./. ` and recorded in `{prefix}.translation_exceptions.tsv`.
+- Missing genotypes (`./. or .|.`) are recorded as `./.` in the output and are **not** treated as exceptions.
+- Any imputed GT that cannot be parsed, or whose decoded nucleotide is not in `{A, T, C, G}`, is set to `./.` and recorded in `{prefix}.translation_exceptions.tsv`.
+- Any truth row whose alleles are not distinct `{A, B}` values is recorded as a truth QC exception in `{prefix}.translation_exceptions.tsv` and emitted with missing genotypes.
 
 **Checkpoint outputs:**
 
 - `{prefix}.imputed.AB_format.tsv` — tab-separated: CHROM, POS, REF, ALT, ID, then one column per sample with A/A, A/B, or B/B genotypes.
-- `{prefix}.truth.AB_format.tsv` — same format.
-- `{prefix}.translation_exceptions.tsv` — unexpected GTs encountered during translation.
+- `{prefix}.truth.AB_format.tsv` — same tabular layout, decoded directly from the already A/B-encoded truth VCF.
+- `{prefix}.translation_exceptions.tsv` — imputed translation exceptions plus truth A/B QC exceptions.
 
 ---
 
@@ -455,6 +461,46 @@ Variants are binned into 1 Mb windows along each chromosome and mean r² is plot
 
 ---
 
+### 5g. Standalone Concordance Check for Array Validation
+
+When the sequencing/imputed samples and array samples are the same biological individuals but use different sample IDs, use the standalone concordance matcher:
+
+```bash
+bash utils/test_concordance_check_with_array_validation.sh \
+  --vcf1      imputed.Chr01.vcf.gz \
+  --truth     array_truth_ab.vcf.gz \
+  --out-prefix results/concordance/Chr01
+```
+
+This utility expects:
+
+- `--vcf1`: a standard nucleotide VCF/BCF.
+- `--truth` or `--vcf`: an already harmonised A/B truth VCF/BCF.
+
+It reuses the same overlap, deduplication, and strand-ambiguity filtering model as `dosage_r2.sh`, then:
+
+1. translates only the query-side VCF into A/B genotype space,
+2. validates and decodes the truth-side A/B VCF without attempting nucleotide translation,
+3. computes all-vs-all pairwise genotype concordance across every `vcf1_sample × truth_sample` pair,
+4. ranks the best and second-best truth match for each query sample.
+
+Quarto-oriented outputs:
+
+- `{prefix}.best_matches.tsv`
+- `{prefix}.pairwise_concordance.tsv`
+- `{prefix}.pipeline_audit.tsv`
+- `{prefix}.output_manifest.tsv`
+
+Downloadable intermediate outputs include:
+
+- overlapped and unambiguous VCF checkpoints,
+- query and truth A/B TSVs,
+- duplicate-removal reports,
+- ambiguous-loci report,
+- query translation exceptions and truth A/B QC exceptions.
+
+---
+
 ## 8. Configuration
 
 Configuration is split across two files:
@@ -500,6 +546,7 @@ SLURM resource defaults (can be overridden via environment variables):
    - `r-base`, `r-data.table`, `r-ggplot2`
    - Optional: `r-arrow` (Parquet output), `r-vcfppr`, `r-hexbin`
 3. Ensure `bcftools` module is available via Lmod.
+4. Ensure any array truth VCF used in Stage 5 has already been harmonised into A/B format before submission.
 
 ### Full Run (Panel Prep + Imputation)
 
@@ -533,6 +580,15 @@ bash bin/dosage_r2_sbatch.sh \
   --truth    data/truth_array.vcf.gz \
   --out-prefix results/eval/Chr01 \
   -- --samples sample_ids.txt --use-vcfpp
+```
+
+### Standalone Concordance Matching Only
+
+```bash
+bash utils/test_concordance_check_with_array_validation.sh \
+  --vcf1      results/imputed.Chr01.vcf.gz \
+  --truth     data/truth_array_ab.vcf.gz \
+  --out-prefix results/concordance/Chr01
 ```
 
 ### Dry Run (Preview SLURM Commands)
@@ -570,6 +626,17 @@ Final per-chromosome imputed VCFs are concatenated to the `--input-dir` or a pat
 ### Evaluation Outputs (`{prefix}.*`)
 
 See the table in [Stage 5f](#5f-r-metrics-and-plots). All files share a common prefix specified by `--out-prefix`. Intermediate files (overlapped, unambiguous, A/B TSVs) are retained alongside final metrics so that specific steps can be re-run or inspected.
+
+### Standalone Concordance Outputs (`{prefix}.*`)
+
+For `utils/test_concordance_check_with_array_validation.sh`, the main Quarto-facing outputs are:
+
+- `{prefix}.best_matches.tsv`
+- `{prefix}.pairwise_concordance.tsv`
+- `{prefix}.pipeline_audit.tsv`
+- `{prefix}.output_manifest.tsv`
+
+The utility also keeps overlapped/unambiguous VCF checkpoints and intermediate TSVs for download and audit.
 
 ### SLURM Logs
 
