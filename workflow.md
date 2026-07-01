@@ -29,11 +29,12 @@
 
 ## 1. Overview
 
-This pipeline performs low-pass whole-genome imputation using **QUILT2** on a SLURM cluster. It is designed around the apple genome (17 chromosomes, `Chr01`–`Chr17`) but is generalisable to any organism.
+This pipeline performs low-pass whole-genome imputation using **QUILT2** on a SLURM cluster. It is designed around the apple genome (17 chromosomes, `Chr01`–`Chr17`) 
 
 The pipeline has five stages:
 
 | Stage | Name | Script | SLURM | Mandatory |
+
 |---|---|---|---|---|
 | 1 | Panel Preparation | `bin/run_quilt2.sh` (Phase 1) | Array per chromosome | Optional |
 | 2 | Chunk Definition | `bin/run_quilt2.sh` | Local / inline | Mandatory |

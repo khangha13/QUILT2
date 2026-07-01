@@ -26,10 +26,11 @@ load_quilt_env || true
 usage() {
     cat <<'EOF'
 Usage:
-  bash bin/run_quilt2.sh -i <work_dir> --genetic-map <map|dir> [options]
+  bash bin/run_quilt2.sh -i <work_dir> --reference-panel-dir <panel_dir> --genetic-map <map|dir> [options]
 
 Required:
-  -i, --input-dir PATH         Working folder (contains 7.Consolidated_VCF or 8.Imputated_VCF_BEAGLE)
+  -i, --input-dir PATH         Run/work folder for outputs, logs, and default bamlist discovery
+  --reference-panel-dir PATH   Directory containing phased per-chromosome panel VCFs
   --genetic-map PATH           Genetic map file or directory with per-chromosome maps
 
 Chunk specification (one of):
@@ -42,7 +43,6 @@ Core options:
   --buffer N                   Buffer bp (default 500000)
   --n-gen N                    nGen passed to QUILT2 (default 100)
   --bamlist PATH               BAM list (defaults to <work_dir>/bamlist.txt or bamlist.1.0.txt)
-  --reference-panel-dir PATH   Panel VCF dir (defaults to 8.Imputated_VCF_BEAGLE then 7.Consolidated_VCF then work_dir)
   --reference-fasta PATH       Reference FASTA (with .fai); used to fix VCF headers with missing contigs
   --quilt2-home PATH           Directory containing QUILT2.R and QUILT2_prepare_reference.R
   --quilt2-prepare-script PATH Override QUILT2_prepare_reference.R
@@ -192,15 +192,7 @@ EOF
 fi
 
 if [[ -z "${REFERENCE_PANEL_DIR}" ]]; then
-    for candidate in "${WORK_DIR}/8.Imputated_VCF_BEAGLE" "${WORK_DIR}/7.Consolidated_VCF" "${WORK_DIR}"; do
-        if [[ -d "${candidate}" ]]; then
-            REFERENCE_PANEL_DIR="${candidate}"
-            break
-        fi
-    done
-fi
-if [[ -z "${REFERENCE_PANEL_DIR}" ]]; then
-    log_error "Unable to resolve reference panel directory. Set --reference-panel-dir."
+    log_error "Missing reference panel directory. Set --reference-panel-dir or QUILT2_REFERENCE_PANEL_DIR."
     exit 1
 fi
 REFERENCE_PANEL_DIR="$(cd "${REFERENCE_PANEL_DIR}" && pwd)"

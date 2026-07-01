@@ -29,19 +29,27 @@ SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C 
 - Behavior toggles: `QUILT2_CHROMS`, `QUILT2_BUFFER`, `QUILT2_NGEN`, `QUILT2_AUTO_CHUNK_MAP`, `QUILT2_CHUNK_FILE`, `QUILT2_REGION_START/END`, `QUILT2_REMOVE_MISSING`, `QUILT2_MIN_VALID_GT_RATE`, `QUILT2_STANDARDISE_NAME`, `QUILT2_STANDARDISE_NAME_FORCE`, `QUILT2_PREP_ONLY`, `QUILT2_IMPUTE_ONLY`, `QUILT2_DRY_RUN`, `QUILT2_BAMLIST`.
 
 ## Inputs
-- `--input-dir` (`WORK_DIR`) containing:
-  - Panel VCFs under `8.Imputated_VCF_BEAGLE/` (preferred) or `7.Consolidated_VCF/`; otherwise `WORK_DIR` is searched. Override with `--reference-panel-dir`.
-  - `bamlist.txt` (or `bamlist.1.0.txt` / `bamlist.tsv`) unless running `--prepare-only`; **still required for `--impute-only`**.
-- Genetic map: `--genetic-map` file or directory with per-chromosome maps. Names must match `--chr` values (`Chr01` vs `1`, etc.). See `dummy_map.md` for creating maps when none are available.
-- Reference panel should be **phased**; use `--remove-missing` with `--min-valid-gt-rate` if needed.
-- Optional: `--reference-fasta` with `.fai` index, used to fix VCF headers with missing contigs during `--standardise-name`.
-- Ensure VCFs are indexed (`.tbi/.csi`).
+- `--input-dir` (`WORK_DIR`): run directory for outputs, logs, temporary files, and default input discovery. This is **not necessarily** the reference panel directory.
+- `--bamlist`: text file listing the low-pass BAMs to impute. It is required for normal runs and `--impute-only`. If omitted, the script searches `WORK_DIR` for `bamlist.txt`, `bamlist.1.0.txt`, then `bamlist.tsv`.
+- `--reference-panel-dir`: directory containing the phased reference panel VCFs. This is required, unless `QUILT2_REFERENCE_PANEL_DIR` is set in `config/environment.sh`.
+- `--genetic-map`: genetic map file or directory with per-chromosome maps. Names must match the chromosome names used for the run (`Chr01` vs `1`, etc.). See `dummy_map.md` for creating maps when none are available.
+- Optional: `--reference-fasta` with `.fai` index, used during `--standardise-name` when VCF headers need contig repair.
+
+Reference panel requirements:
+- Use **VCF/BCF-style reference panel files**, normally compressed as `*.vcf.gz`. Do not pass gVCF files; QUILT2 expects called genotype records, not gVCF reference blocks.
+- The panel must be **phased** and contain phased `GT` values such as `0|0`, `0|1`, or `1|0`.
+- Panel VCFs should be split or named per chromosome. The script looks for names such as `apple_panel.refpol.Chr01.vcf.gz`, `panel.snps.clean__Chr01.vcf.gz`, `Chr01.vcf.gz`, or matching `Chr01_*.vcf.gz`, `Chr01.*.vcf.gz`, `Chr01-*.vcf.gz`.
+- VCFs must be bgzip-compressed and indexed (`.tbi` or `.csi`). The script tries to index `*.vcf.gz`, but pre-indexing avoids cluster-time failures.
+- Recommended chromosome naming is `Chr01`-`Chr17`. If the panel uses bare numeric contigs (`1`-`17`), add `--standardise-name` to create `ChrNN` panel VCFs in `quilt2_output/panel/`. If the panel uses another convention, pre-standardise it or make sure `--chr`, the panel VCFs, and genetic maps all use the same names.
+- If panel variants contain missing or unphased genotypes, use `--remove-missing --min-valid-gt-rate <rate>` to keep only variants passing the phased-genotype threshold.
 
 ## Quick Start
 Full run (auto chunks from genetic map directory):
 ```bash
 bash bin/run_quilt2.sh \
-  -i /path/to/work_dir \
+  -i /path/to/quilt2_run_dir \
+  --bamlist /path/to/bamlist.txt \
+  --reference-panel-dir /path/to/phased_panel_vcfs \
   --genetic-map /path/to/genetic_maps_dir \
   --auto-chunk-map \
   --remove-missing --min-valid-gt-rate 0.95
@@ -50,7 +58,9 @@ bash bin/run_quilt2.sh \
 Fixed region for all chromosomes:
 ```bash
 bash bin/run_quilt2.sh \
-  -i /path/to/work_dir \
+  -i /path/to/quilt2_run_dir \
+  --bamlist /path/to/bamlist.txt \
+  --reference-panel-dir /path/to/phased_panel_vcfs \
   --genetic-map /path/to/genetic_maps_dir \
   --region-start 1 --region-end 5000000
 ```
@@ -58,7 +68,9 @@ bash bin/run_quilt2.sh \
 Impute-only (prepared references already exist):
 ```bash
 bash bin/run_quilt2.sh \
-  -i /path/to/work_dir \
+  -i /path/to/quilt2_run_dir \
+  --bamlist /path/to/bamlist.txt \
+  --reference-panel-dir /path/to/phased_panel_vcfs \
   --genetic-map /path/to/genetic_maps_dir \
   --impute-only \
   --region-start 1 --region-end 5000000
@@ -85,7 +97,9 @@ Point to QUILT2 scripts:
 Per-chunk evaluation against a truth VCF (uses vcfppR):
 ```bash
 bash bin/run_quilt2.sh \
-  -i /path/to/work_dir \
+  -i /path/to/quilt2_run_dir \
+  --bamlist /path/to/bamlist.txt \
+  --reference-panel-dir /path/to/phased_panel_vcfs \
   --genetic-map /path/to/genetic_maps_dir \
   --region-start 1 --region-end 5000000 \
   --truth-vcf /path/to/truth.vcf.gz \

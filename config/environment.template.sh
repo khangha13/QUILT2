@@ -30,7 +30,7 @@ QUILT2_REFERENCE_FASTA="${QUILT2_REFERENCE_FASTA:-/QRISdata/Q8367/Reference_Geno
 # Genetic map (file or directory with per-chromosome maps); can be overridden via CLI
 QUILT2_GENETIC_MAP="${QUILT2_GENETIC_MAP:-/QRISdata/Q8367/Genetic_Maps/PLEASE_SET}"
 
-# Default reference panel directory (optional; CLI still auto-resolves if unset)
+# Reference panel directory. Set this here or pass --reference-panel-dir.
 QUILT2_REFERENCE_PANEL_DIR="${QUILT2_REFERENCE_PANEL_DIR:-}"
 
 # -----------------------------------------------------------------------------
