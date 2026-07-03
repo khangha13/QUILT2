@@ -158,7 +158,7 @@ bash bin/run_quilt2.sh --region-start 1 --region-end 5000000 ...
 
 ### Output
 
-The chunk manifest is written to `quilt2_output/tmp/chunks.tsv` and drives the SLURM array size in Stages 3 and 4.
+The chunk manifest is written to `OUTPUT_DIR/chunks/manifests/` and drives the SLURM array size in Stages 3 and 4.
 
 ---
 
@@ -176,7 +176,7 @@ For each chunk, QUILT2 builds a compressed reference haplotype object (`.RData`)
 
 ```bash
 Rscript QUILT2_prepare_reference.R \
-  --outputdir quilt2_output/RData \
+  --outputdir OUTPUT_DIR/prepared_reference \
   --chr Chr01 \
   --regionStart 1 \
   --regionEnd 5000000 \
@@ -192,9 +192,9 @@ Rscript QUILT2_prepare_reference.R \
 |---|---|---|
 | `--nGen` | 100 | Effective number of generations since divergence from panel |
 | `--buffer` | 500000 bp | Overlap region on each side of a chunk |
-| `--outputdir` | `quilt2_output/RData/` | Where `.RData` objects are saved |
+| `--outputdir` | `OUTPUT_DIR/prepared_reference/` | Where `.RData` objects are saved |
 
-**Output:** `quilt2_output/RData/RData.Chr01.1.5000000.RData` (one per chunk)
+**Output:** `OUTPUT_DIR/prepared_reference/QUILT_prepared_reference.Chr01.1.5000000.RData` (one per chunk)
 
 > This phase can be re-used across multiple imputation runs without re-running if the panel is unchanged. Use `--impute-only` to skip it.
 
@@ -212,28 +212,30 @@ Each array task imputes genotypes for all samples listed in `bamlist.txt` for on
 
 ```bash
 Rscript QUILT2.R \
-  --outputdir quilt2_output/Chr01/1_5000000 \
+  --output_filename OUTPUT_DIR/chunks/imputed/Chr01/quilt2.diploid.Chr01.1-5000000.vcf.gz \
   --chr Chr01 \
   --regionStart 1 \
   --regionEnd 5000000 \
   --buffer 500000 \
   --nGen 100 \
   --bamlist bamlist.txt \
-  --reference_haplotype_file quilt2_output/RData/RData.Chr01.1.5000000.RData
+  --reference_haplotype_file OUTPUT_DIR/prepared_reference/QUILT_prepared_reference.Chr01.1.5000000.RData
 ```
 
 Output: a per-chunk VCF with imputed `GT`, `DS` (dosage), and `GP` (genotype probability) fields.
 
 ### 4b. Concatenation
 
-Once all chunk jobs for a chromosome complete, the orchestrator concatenates chunk VCFs into a final per-chromosome imputed VCF:
+Once all chunk jobs for a chromosome complete, per-chunk VCFs are available under `OUTPUT_DIR/chunks/imputed/<chr>/`. If you concatenate them downstream:
 
 ```bash
-bcftools concat --naive -Oz -o imputed.Chr01.vcf.gz quilt2_output/Chr01/*/*.vcf.gz
-tabix -p vcf imputed.Chr01.vcf.gz
+bcftools concat --naive -Oz \
+  -o OUTPUT_DIR/chunks/imputed/Chr01/imputed.Chr01.vcf.gz \
+  OUTPUT_DIR/chunks/imputed/Chr01/quilt2.diploid.Chr01.*.vcf.gz
+tabix -p vcf OUTPUT_DIR/chunks/imputed/Chr01/imputed.Chr01.vcf.gz
 ```
 
-**Final output:** `imputed.<chr>.vcf.gz` — one VCF per chromosome, containing imputed genotypes for all samples across all chunks.
+**Per-chunk output:** `quilt2.diploid.<chr>.<start>-<end>.vcf.gz` — one VCF per chunk.
 
 ---
 
@@ -563,6 +565,8 @@ SLURM resource defaults (can be overridden via environment variables):
 ```bash
 bash bin/run_quilt2.sh \
   --input-dir /data/apple_lowpass \
+  --output-dir /data/apple_lowpass/quilt2_output \
+  --reference-panel-dir /data/panels/apple_phased \
   --genetic-map /data/maps/apple \
   --auto-chunk-map \
   --standardise-name \
@@ -577,6 +581,8 @@ bash bin/run_quilt2.sh \
 ```bash
 bash bin/run_quilt2.sh \
   --input-dir /data/apple_lowpass \
+  --output-dir /data/apple_lowpass/quilt2_output \
+  --reference-panel-dir /data/panels/apple_phased \
   --genetic-map /data/maps/apple \
   --chunk-file chunks.tsv \
   --impute-only
@@ -606,6 +612,8 @@ bash utils/test_concordance_check_with_array_validation.sh \
 ```bash
 bash bin/run_quilt2.sh \
   --input-dir /data/apple_lowpass \
+  --output-dir /data/apple_lowpass/quilt2_output \
+  --reference-panel-dir /data/panels/apple_phased \
   --genetic-map /data/maps/apple \
   --auto-chunk-map \
   --dry-run
@@ -615,23 +623,33 @@ bash bin/run_quilt2.sh \
 
 ## 10. Output Files
 
-### Imputation Outputs (`quilt2_output/`)
+### Imputation Outputs (`OUTPUT_DIR/`)
 
 ```
-quilt2_output/
+OUTPUT_DIR/
 ├── panel/
-│   ├── <chr>.filtered.vcf.gz       # Panel after Stage 1 (if run)
-│   └── missing_sites_removed.tsv   # Sites removed by quality filter
-├── RData/
-│   └── RData.<chr>.<start>.<end>.RData  # QUILT2 reference objects (one per chunk)
-├── <chr>/
-│   └── <start>_<end>/
-│       └── quilt.output.vcf.gz     # Per-chunk imputed VCF
-└── tmp/
-    └── chunks.tsv                  # Chunk manifest used for array submission
+│   ├── standardised/
+│   │   └── <chr>_chr.vcf.gz             # Standardised panel, if requested
+│   └── nomiss/
+│       └── quilt.nomiss.<chr>.vcf.gz    # Missing-filtered panel, if requested
+├── prepared_reference/
+│   └── QUILT_prepared_reference.<chr>.<start>.<end>.RData
+├── chunks/
+│   ├── manifests/
+│   │   └── quilt2_chunks_<timestamp>.txt
+│   └── imputed/
+│       └── <chr>/
+│           └── quilt2.diploid.<chr>.<start>-<end>.vcf.gz
+├── eval/
+├── logs/
+│   ├── scripts/
+│   ├── master/
+│   ├── phase1_panel/
+│   └── phase2_chunks/
+└── run_manifest.tsv
 ```
 
-Final per-chromosome imputed VCFs are concatenated to the `--input-dir` or a path specified by `--eval-output`.
+`--scratch-dir` is optional and only used for disposable task staging. If omitted, SLURM tasks use `$TMPDIR` when available; otherwise they use `OUTPUT_DIR/scratch`.
 
 ### Evaluation Outputs (`{prefix}.*`)
 
@@ -650,13 +668,7 @@ The utility also keeps overlapped/unambiguous VCF checkpoints and intermediate T
 
 ### SLURM Logs
 
-```
-quilt2_slurm/
-├── quilt2_master_<jobid>.output     # Master job stdout
-├── quilt2_master_<jobid>.error      # Master job stderr
-├── quilt2_array_<jobid>_<task>.output  # Per-chunk stdout
-└── quilt2_array_<jobid>_<task>.error   # Per-chunk stderr
-```
+SLURM logs and generated job scripts are written under `OUTPUT_DIR/logs/`.
 
 For evaluation jobs:
 

@@ -12,8 +12,8 @@ fi
 
 source "${QUILT2_ROOT}/lib/functions.sh"
 
-if [ "$#" -lt 17 ]; then
-    log_error "Usage: quilt2_job.sh <WORK_DIR> <CHUNK_MANIFEST> <REFERENCE_PANEL_DIR> <GENETIC_MAP> <GENETIC_MAP_IS_DIR> <QUILT2_PREP_SCRIPT> <QUILT2_RUN_SCRIPT> <BAMLIST> <NGEN> <REMOVE_MISSING> <MIN_VALID_GT_RATE> <PREP_ONLY> <IMPUTE_ONLY> <OUTPUT_DIR> <PANEL_OUT_DIR> <RDATA_DIR> <TMP_DIR> [BCFTOOLS_MODULE] [QUILT2_CONDA_ENV]"
+if [ "$#" -lt 18 ]; then
+    log_error "Usage: quilt2_job.sh <WORK_DIR> <CHUNK_MANIFEST> <REFERENCE_PANEL_DIR> <GENETIC_MAP> <GENETIC_MAP_IS_DIR> <QUILT2_PREP_SCRIPT> <QUILT2_RUN_SCRIPT> <BAMLIST> <NGEN> <REMOVE_MISSING> <MIN_VALID_GT_RATE> <PREP_ONLY> <IMPUTE_ONLY> <OUTPUT_DIR> <CHUNK_IMPUTED_DIR> <PANEL_NOMISS_DIR> <RDATA_DIR> <SCRATCH_DIR> [BCFTOOLS_MODULE] [QUILT2_CONDA_ENV]"
     exit 1
 fi
 
@@ -31,15 +31,16 @@ MIN_VALID_GT_RATE="${11}"
 PREP_ONLY="${12}"
 IMPUTE_ONLY="${13}"
 OUTPUT_DIR="${14}"
-PANEL_OUT_DIR="${15}"
-RDATA_DIR="${16}"
-TMP_DIR="${17}"
-BCFTOOLS_MODULE="${18:-${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}}"
-QUILT2_CONDA_ENV="${19:-${QUILT2_CONDA_ENV:-quilt2}}"
+CHUNK_IMPUTED_DIR="${15}"
+PANEL_OUT_DIR="${16}"
+RDATA_DIR="${17}"
+SCRATCH_DIR="${18}"
+BCFTOOLS_MODULE="${19:-${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}}"
+QUILT2_CONDA_ENV="${20:-${QUILT2_CONDA_ENV:-quilt2}}"
 
 # Optional evaluation inputs (may be blank)
-TRUTH_VCF="${20:-}"
-EVAL_OUTPUT_DIR="${21:-}"
+TRUTH_VCF="${21:-}"
+EVAL_OUTPUT_DIR="${22:-}"
 
 # Export flags for helper functions
 export REMOVE_MISSING MIN_VALID_GT_RATE PANEL_OUT_DIR
@@ -72,6 +73,10 @@ IFS='|' read -r CHUNK_ID CHR START END BUFFER <<< "${CHUNK}"
 
 log_info "Array task ${SLURM_ARRAY_TASK_ID}/${chunk_count} processing chunk ${CHUNK_ID} (${CHR}:${START}-${END}, buffer=${BUFFER})"
 
+TASK_SCRATCH_DIR="$(resolve_task_scratch_dir "${SCRATCH_DIR}" "${OUTPUT_DIR}" "quilt2")" || exit 1
+export TMPDIR="${TASK_SCRATCH_DIR}"
+log_info "Task scratch directory: ${TASK_SCRATCH_DIR}"
+
 # Prepare environment and toolchain
 export BCFTOOLS_MODULE QUILT2_CONDA_ENV
 load_quilt_env
@@ -87,7 +92,7 @@ fi
 GENETIC_MAP_FILE="$(resolve_genetic_map "${CHR}" "${GENETIC_MAP_IS_DIR}" "${GENETIC_MAP_INPUT}" "${GENETIC_MAP_DIR}")" || exit 1
 
 # Ensure output dirs exist
-mkdir -p "${OUTPUT_DIR}" "${PANEL_OUT_DIR}" "${RDATA_DIR}" "${TMP_DIR}"
+mkdir -p "${OUTPUT_DIR}" "${PANEL_OUT_DIR}" "${RDATA_DIR}" "${CHUNK_IMPUTED_DIR%/}/${CHR}" "${TASK_SCRATCH_DIR}"
 
 # Panel VCF selection / optional missingness filtering
 panel_vcf="$(normalize_panel_vcf "${CHR}" "${REFERENCE_PANEL_DIR}")" || exit 1
@@ -129,7 +134,7 @@ prepare_reference_chunk() {
         "--regionEnd=${end}"
         "--nGen=${NGEN}"
         "--buffer=${buffer}"
-        "--outputdir=${OUTPUT_DIR}"
+        "--outputdir=${RDATA_DIR}"
     )
 
     run_cmd "${cmd[@]}"
@@ -148,7 +153,7 @@ impute_chunk() {
         return 1
     fi
 
-    local output_vcf="${OUTPUT_DIR%/}/quilt2.diploid.${chr}.${start}-${end}.vcf.gz"
+    local output_vcf="${CHUNK_IMPUTED_DIR%/}/${chr}/quilt2.diploid.${chr}.${start}-${end}.vcf.gz"
     if [[ -f "${output_vcf}" && "${PREP_ONLY}" == "false" ]]; then
         log_info "Imputation output exists for ${chr}:${start}-${end}; skipping."
         return 0

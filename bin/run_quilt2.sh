@@ -29,7 +29,7 @@ Usage:
   bash bin/run_quilt2.sh -i <work_dir> --reference-panel-dir <panel_dir> --genetic-map <map|dir> [options]
 
 Required:
-  -i, --input-dir PATH         Run/work folder for outputs, logs, and default bamlist discovery
+  -i, --input-dir PATH         Run/input folder; used for default bamlist discovery
   --reference-panel-dir PATH   Directory containing phased per-chromosome panel VCFs
   --genetic-map PATH           Genetic map file or directory with per-chromosome maps
 
@@ -43,6 +43,8 @@ Core options:
   --buffer N                   Buffer bp (default 500000)
   --n-gen N                    nGen passed to QUILT2 (default 100)
   --bamlist PATH               BAM list (defaults to <work_dir>/bamlist.txt or bamlist.1.0.txt)
+  --output-dir PATH            Persistent output directory (default <work_dir>/quilt2_output)
+  --scratch-dir PATH           Optional scratch/staging root (default task $TMPDIR, then <output-dir>/scratch)
   --reference-fasta PATH       Reference FASTA (with .fai); used to fix VCF headers with missing contigs
   --quilt2-home PATH           Directory containing QUILT2.R and QUILT2_prepare_reference.R
   --quilt2-prepare-script PATH Override QUILT2_prepare_reference.R
@@ -73,6 +75,8 @@ DEFAULT_NGEN="${QUILT2_NGEN:-100}"
 
 ORIG_ARGS=("$@")
 INPUT_DIR=""
+OUTPUT_DIR="${QUILT2_OUTPUT_DIR:-}"
+SCRATCH_DIR="${QUILT2_SCRATCH_DIR:-}"
 REFERENCE_PANEL_DIR="${QUILT2_REFERENCE_PANEL_DIR:-}"
 GENETIC_MAP_FILE="${QUILT2_GENETIC_MAP:-}"
 REFERENCE_FASTA="${QUILT2_REFERENCE_FASTA:-${PIPELINE_REFERENCE_FASTA:-}}"
@@ -103,6 +107,8 @@ SUBMIT_SELF="true"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -i|--input-dir) INPUT_DIR="$2"; shift 2 ;;
+        --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
+        --scratch-dir) SCRATCH_DIR="$2"; shift 2 ;;
         --reference-panel-dir) REFERENCE_PANEL_DIR="$2"; shift 2 ;;
         --genetic-map) GENETIC_MAP_FILE="$2"; shift 2 ;;
         --reference-fasta) REFERENCE_FASTA="$2"; shift 2 ;;
@@ -148,24 +154,53 @@ if [[ "${PREP_ONLY}" == "true" && "${IMPUTE_ONLY}" == "true" ]]; then
 fi
 
 WORK_DIR="$(cd "${INPUT_DIR}" && pwd)"
-OUTPUT_DIR="${WORK_DIR%/}/quilt2_output"
-PANEL_OUT_DIR="${OUTPUT_DIR}/panel"
-RDATA_DIR="${OUTPUT_DIR}/RData"
-TMP_DIR="${OUTPUT_DIR}/tmp"
-SLURM_DIR="${WORK_DIR%/}/quilt2_slurm"
-mkdir -p "${OUTPUT_DIR}" "${PANEL_OUT_DIR}" "${RDATA_DIR}" "${TMP_DIR}" "${SLURM_DIR}"
-MISSING_REPORT="${PANEL_OUT_DIR}/missing_sites_removed.tsv"
-NOMISS_FAIL_FLAG="${SLURM_DIR}/quilt2_nomiss_failed.flag"
+if [[ -z "${OUTPUT_DIR}" ]]; then
+    OUTPUT_DIR="${WORK_DIR%/}/quilt2_output"
+fi
+mkdir -p "${OUTPUT_DIR}"
+OUTPUT_DIR="$(cd "${OUTPUT_DIR}" && pwd)"
+
+if [[ -n "${SCRATCH_DIR}" ]]; then
+    mkdir -p "${SCRATCH_DIR}"
+    SCRATCH_DIR="$(cd "${SCRATCH_DIR}" && pwd)"
+fi
+
+PANEL_DIR="${OUTPUT_DIR}/panel"
+PANEL_STANDARDISED_DIR="${PANEL_DIR}/standardised"
+PANEL_NOMISS_DIR="${PANEL_DIR}/nomiss"
+RDATA_DIR="${OUTPUT_DIR}/prepared_reference"
+CHUNK_DIR="${OUTPUT_DIR}/chunks"
+CHUNK_MANIFEST_DIR="${CHUNK_DIR}/manifests"
+CHUNK_IMPUTED_DIR="${CHUNK_DIR}/imputed"
+EVAL_DEFAULT_DIR="${OUTPUT_DIR}/eval"
+LOG_DIR="${OUTPUT_DIR}/logs"
+SLURM_SCRIPT_DIR="${LOG_DIR}/scripts"
+SLURM_MASTER_LOG_DIR="${LOG_DIR}/master"
+SLURM_PHASE1_LOG_DIR="${LOG_DIR}/phase1_panel"
+SLURM_PHASE2_LOG_DIR="${LOG_DIR}/phase2_chunks"
+mkdir -p \
+    "${PANEL_STANDARDISED_DIR}" \
+    "${PANEL_NOMISS_DIR}" \
+    "${RDATA_DIR}" \
+    "${CHUNK_MANIFEST_DIR}" \
+    "${CHUNK_IMPUTED_DIR}" \
+    "${EVAL_DEFAULT_DIR}" \
+    "${SLURM_SCRIPT_DIR}" \
+    "${SLURM_MASTER_LOG_DIR}" \
+    "${SLURM_PHASE1_LOG_DIR}" \
+    "${SLURM_PHASE2_LOG_DIR}"
+MISSING_REPORT="${PANEL_NOMISS_DIR}/missing_sites_removed.tsv"
+NOMISS_FAIL_FLAG="${LOG_DIR}/quilt2_nomiss_failed.flag"
 
 if [[ "${SUBMIT_SELF}" == "true" && -z "${SLURM_JOB_ID:-}" ]]; then
-    MASTER_SCRIPT="${SLURM_DIR}/quilt2_master_$(date +%Y%m%d_%H%M%S).sh"
+    MASTER_SCRIPT="${SLURM_SCRIPT_DIR}/quilt2_master_$(date +%Y%m%d_%H%M%S).sh"
     args_quoted="$(printf " %q" "${ORIG_ARGS[@]}")"
     {
     cat <<EOF
 #!/bin/bash
 #SBATCH --job-name=Q2_MASTER
-#SBATCH --output=${SLURM_DIR}/quilt2_master_%j.output
-#SBATCH --error=${SLURM_DIR}/quilt2_master_%j.error
+#SBATCH --output=${SLURM_MASTER_LOG_DIR}/quilt2_master_%j.output
+#SBATCH --error=${SLURM_MASTER_LOG_DIR}/quilt2_master_%j.error
 
 export QUILT2_ROOT="${QUILT2_ROOT}"
 
@@ -184,10 +219,10 @@ EOF
         log_error "Failed to submit master job."
         exit 1
     fi
-    echo "${master_job_id}" > "${SLURM_DIR}/quilt2_master_job_id.txt"
+    echo "${master_job_id}" > "${LOG_DIR}/quilt2_master_job_id.txt"
     log_info "Submitted master job ${master_job_id}"
     log_info "SLURM script: ${MASTER_SCRIPT}"
-    log_info "SLURM logs:   ${SLURM_DIR}/quilt2_master_%j.(output|error)"
+    log_info "SLURM logs:   ${SLURM_MASTER_LOG_DIR}/quilt2_master_%j.(output|error)"
     exit 0
 fi
 
@@ -309,7 +344,7 @@ if [[ "${RUN_PHASE1}" == "true" ]]; then
         PHASE1_CHR_LIST=( "${PHASE1_CHR_LIST[@]:0:${configured_array_limit}}" )
     fi
 
-    nomiss_manifest="${SLURM_DIR}/quilt2_nomiss_chr_$(date +%Y%m%d_%H%M%S).txt"
+    nomiss_manifest="${CHUNK_MANIFEST_DIR}/quilt2_nomiss_chr_$(date +%Y%m%d_%H%M%S).txt"
     : > "${nomiss_manifest}"
     for chr in "${PHASE1_CHR_LIST[@]}"; do
         echo "${chr}" >> "${nomiss_manifest}"
@@ -326,7 +361,7 @@ if [[ "${RUN_PHASE1}" == "true" ]]; then
     # Auto-detect .fai: derive from REFERENCE_FASTA if not explicitly set (before heredoc expansion)
     REFERENCE_FASTA_INDEX="${REFERENCE_FASTA_INDEX:-${REFERENCE_FASTA:+${REFERENCE_FASTA}.fai}}"
 
-    NOMISS_SCRIPT="${SLURM_DIR}/quilt2_nomiss_$(date +%Y%m%d_%H%M%S).sh"
+    NOMISS_SCRIPT="${SLURM_SCRIPT_DIR}/quilt2_nomiss_$(date +%Y%m%d_%H%M%S).sh"
     {
     cat <<EOF
 #!/bin/bash
@@ -343,8 +378,8 @@ EOF
 #SBATCH --mem=${CFG_MEMORY}
 #SBATCH --time=${CFG_TIME}
 #SBATCH --array=0-${nomiss_array_max}
-#SBATCH --output=${SLURM_DIR}/quilt2_nomiss_%A_%a.output
-#SBATCH --error=${SLURM_DIR}/quilt2_nomiss_%A_%a.error
+#SBATCH --output=${SLURM_PHASE1_LOG_DIR}/quilt2_nomiss_%A_%a.output
+#SBATCH --error=${SLURM_PHASE1_LOG_DIR}/quilt2_nomiss_%A_%a.error
 
 export QUILT2_ROOT="${QUILT2_ROOT}"
 export DRY_RUN="${DRY_RUN}"
@@ -360,7 +395,8 @@ export REFERENCE_FASTA_INDEX="${REFERENCE_FASTA_INDEX:-}"
 bash "${NOMISS_TEMPLATE}" \
   "${WORK_DIR}" \
   "${REFERENCE_PANEL_DIR}" \
-  "${PANEL_OUT_DIR}" \
+  "${PANEL_STANDARDISED_DIR}" \
+  "${PANEL_NOMISS_DIR}" \
   "${MIN_VALID_GT_RATE}" \
   "${nomiss_manifest}" \
   "${BCFTOOLS_MODULE}" \
@@ -379,7 +415,7 @@ EOF
             log_error "Failed to submit Phase 1 SLURM job."
             exit 1
         fi
-        echo "${nomiss_job_id}" > "${SLURM_DIR}/quilt2_nomiss_job_id.txt"
+        echo "${nomiss_job_id}" > "${LOG_DIR}/quilt2_nomiss_job_id.txt"
         log_info "Submitted Phase 1 array job ${nomiss_job_id} (script: ${NOMISS_SCRIPT})"
         wait_for_slurm_job "${nomiss_job_id}" "Phase 1 remove-missing" "${NOMISS_FAIL_FLAG}"
     fi
@@ -388,7 +424,7 @@ EOF
     if [[ "${DRY_RUN}" != "true" ]]; then
         for chr in "${PHASE1_CHR_LIST[@]}"; do
             if [[ "${STANDARDISE_NAME}" == "true" ]]; then
-                std="${PANEL_OUT_DIR%/}/${chr}_chr.vcf.gz"
+                std="${PANEL_STANDARDISED_DIR%/}/${chr}_chr.vcf.gz"
                 if [[ ! -s "${std}" ]]; then
                     log_error "Phase 1 standardised VCF missing for ${chr}: ${std}"
                     exit 1
@@ -399,7 +435,7 @@ EOF
                 fi
             fi
             if [[ "${REMOVE_MISSING}" == "true" ]]; then
-                cleaned="${PANEL_OUT_DIR%/}/quilt.nomiss.${chr}.vcf.gz"
+                cleaned="${PANEL_NOMISS_DIR%/}/quilt.nomiss.${chr}.vcf.gz"
                 if [[ ! -s "${cleaned}" ]]; then
                     log_error "Phase 1 filtered VCF missing for ${chr}: ${cleaned}"
                     exit 1
@@ -460,7 +496,7 @@ if [[ -z "${CHUNK_FILE}" && "${AUTO_CHUNK_MAP}" == "true" ]]; then
         log_error "--auto-chunk-map requested but R package 'QUILT' is not installed."
         exit 1
     fi
-    CHUNK_FILE="${TMP_DIR%/}/quilt_auto_chunks.tsv"
+    CHUNK_FILE="${CHUNK_MANIFEST_DIR%/}/quilt_auto_chunks.tsv"
     log_info "Auto-deriving chunks with QUILT::quilt_chunk_map into ${CHUNK_FILE}"
 
     chr_map_pairs=""
@@ -541,7 +577,7 @@ if [[ "${#CHUNKS[@]}" -eq 0 ]]; then
 fi
 
 # Persist manifest
-MANIFEST_FILE="${TMP_DIR%/}/quilt2_chunks_$(date +%Y%m%d_%H%M%S).txt"
+MANIFEST_FILE="${CHUNK_MANIFEST_DIR%/}/quilt2_chunks_$(date +%Y%m%d_%H%M%S).txt"
 create_chunk_manifest "${MANIFEST_FILE}" "${CHUNKS[@]}" || exit 1
 
 array_max=$(( ${#CHUNKS[@]} - 1 ))
@@ -551,12 +587,46 @@ if [[ "${configured_array_limit}" -gt 0 && "${array_max}" -ge "${configured_arra
     array_max=$((configured_array_limit - 1))
 fi
 
-SLURM_SCRIPT="${SLURM_DIR}/quilt2_array_$(date +%Y%m%d_%H%M%S).sh"
+SLURM_SCRIPT="${SLURM_SCRIPT_DIR}/quilt2_array_$(date +%Y%m%d_%H%M%S).sh"
 TEMPLATE="${QUILT2_ROOT}/templates/quilt2_job.sh"
 PHASE2_PANEL_DIR="${REFERENCE_PANEL_DIR}"
-if [[ "${RUN_PHASE1}" == "true" ]]; then
-    PHASE2_PANEL_DIR="${PANEL_OUT_DIR}"
+if [[ "${REMOVE_MISSING}" == "true" ]]; then
+    PHASE2_PANEL_DIR="${PANEL_NOMISS_DIR}"
+elif [[ "${STANDARDISE_NAME}" == "true" ]]; then
+    PHASE2_PANEL_DIR="${PANEL_STANDARDISED_DIR}"
 fi
+
+RUN_MANIFEST="${OUTPUT_DIR}/run_manifest.tsv"
+SCRATCH_DISPLAY="${SCRATCH_DIR:-task TMPDIR or ${OUTPUT_DIR}/scratch}"
+{
+    printf "key\tvalue\n"
+    printf "timestamp\t%s\n" "$(date -Iseconds)"
+    printf "command\t%s\n" "$(printf "%q " "${ORIG_ARGS[@]}")"
+    printf "input_dir\t%s\n" "${WORK_DIR}"
+    printf "output_dir\t%s\n" "${OUTPUT_DIR}"
+    printf "scratch_dir\t%s\n" "${SCRATCH_DISPLAY}"
+    printf "reference_panel_dir\t%s\n" "${REFERENCE_PANEL_DIR}"
+    printf "phase2_panel_dir\t%s\n" "${PHASE2_PANEL_DIR}"
+    printf "bamlist\t%s\n" "${BAMLIST:-<none>}"
+    printf "genetic_map\t%s\n" "${GENETIC_MAP_FILE}"
+    printf "genetic_map_is_dir\t%s\n" "${GENETIC_MAP_IS_DIR}"
+    printf "chromosomes\t%s\n" "${CHR_LIST[*]}"
+    printf "chunk_count\t%s\n" "${#CHUNKS[@]}"
+    printf "chunk_manifest\t%s\n" "${MANIFEST_FILE}"
+    printf "auto_chunk_map\t%s\n" "${AUTO_CHUNK_MAP}"
+    printf "chunk_file\t%s\n" "${CHUNK_FILE:-<none>}"
+    printf "region_start\t%s\n" "${REGION_START}"
+    printf "region_end\t%s\n" "${REGION_END:-<none>}"
+    printf "buffer\t%s\n" "${BUFFER}"
+    printf "n_gen\t%s\n" "${NGEN}"
+    printf "remove_missing\t%s\n" "${REMOVE_MISSING}"
+    printf "min_valid_gt_rate\t%s\n" "${MIN_VALID_GT_RATE}"
+    printf "standardise_name\t%s\n" "${STANDARDISE_NAME}"
+    printf "prepare_only\t%s\n" "${PREP_ONLY}"
+    printf "impute_only\t%s\n" "${IMPUTE_ONLY}"
+    printf "dry_run\t%s\n" "${DRY_RUN}"
+} > "${RUN_MANIFEST}"
+log_info "Run manifest: ${RUN_MANIFEST}"
 
 if [[ ! -f "${TEMPLATE}" ]]; then
     log_error "Template not found: ${TEMPLATE}"
@@ -579,8 +649,8 @@ cat <<EOF
 #SBATCH --mem=${CFG_MEMORY}
 #SBATCH --time=${CFG_TIME}
 #SBATCH --array=0-${array_max}
-#SBATCH --output=${SLURM_DIR}/quilt2_%A_%a.output
-#SBATCH --error=${SLURM_DIR}/quilt2_%A_%a.error
+#SBATCH --output=${SLURM_PHASE2_LOG_DIR}/quilt2_%A_%a.output
+#SBATCH --error=${SLURM_PHASE2_LOG_DIR}/quilt2_%A_%a.error
 
 export QUILT2_ROOT="${QUILT2_ROOT}"
 export DRY_RUN="${DRY_RUN}"
@@ -600,13 +670,14 @@ bash "${TEMPLATE}" \
   "${PREP_ONLY}" \
   "${IMPUTE_ONLY}" \
   "${OUTPUT_DIR}" \
-  "${PANEL_OUT_DIR}" \
+  "${CHUNK_IMPUTED_DIR}" \
+  "${PANEL_NOMISS_DIR}" \
   "${RDATA_DIR}" \
-  "${TMP_DIR}" \
+  "${SCRATCH_DIR}" \
   "${BCFTOOLS_MODULE}" \
   "${QUILT2_CONDA_ENV}" \
   "${TRUTH_VCF}" \
-  "${EVAL_OUTPUT_DIR}"
+  "${EVAL_OUTPUT_DIR:-${EVAL_DEFAULT_DIR}}"
 EOF
 } > "${SLURM_SCRIPT}"
 chmod +x "${SLURM_SCRIPT}"
@@ -625,5 +696,5 @@ if [[ -z "${job_id}" ]]; then
     exit 1
 fi
 
-echo "${job_id}" > "${SLURM_DIR}/quilt2_job_id.txt"
+echo "${job_id}" > "${LOG_DIR}/quilt2_job_id.txt"
 log_info "Submitted QUILT2 array job ${job_id} (script: ${SLURM_SCRIPT})"

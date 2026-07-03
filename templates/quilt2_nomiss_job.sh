@@ -12,19 +12,20 @@ fi
 
 source "${QUILT2_ROOT}/lib/functions.sh"
 
-if [ "$#" -lt 5 ]; then
-    log_error "Usage: quilt2_nomiss_job.sh <WORK_DIR> <REFERENCE_PANEL_DIR> <PANEL_OUT_DIR> <MIN_VALID_GT_RATE> <CHR_MANIFEST> [BCFTOOLS_MODULE] [QUILT2_CONDA_ENV] [FAIL_FLAG]"
+if [ "$#" -lt 6 ]; then
+    log_error "Usage: quilt2_nomiss_job.sh <WORK_DIR> <REFERENCE_PANEL_DIR> <PANEL_STANDARDISED_DIR> <PANEL_NOMISS_DIR> <MIN_VALID_GT_RATE> <CHR_MANIFEST> [BCFTOOLS_MODULE] [QUILT2_CONDA_ENV] [FAIL_FLAG]"
     exit 1
 fi
 
 WORK_DIR="$1"
 REFERENCE_PANEL_DIR="$2"
-PANEL_OUT_DIR="$3"
-MIN_VALID_GT_RATE="$4"
-CHR_MANIFEST="$5"
-BCFTOOLS_MODULE="${6:-${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}}"
-QUILT2_CONDA_ENV="${7:-${QUILT2_CONDA_ENV:-quilt2}}"
-FAIL_FLAG="${8:-${NOMISS_FAIL_FLAG:-}}"
+PANEL_STANDARDISED_DIR="$3"
+PANEL_NOMISS_DIR="$4"
+MIN_VALID_GT_RATE="$5"
+CHR_MANIFEST="$6"
+BCFTOOLS_MODULE="${7:-${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}}"
+QUILT2_CONDA_ENV="${8:-${QUILT2_CONDA_ENV:-quilt2}}"
+FAIL_FLAG="${9:-${NOMISS_FAIL_FLAG:-}}"
 STANDARDISE_NAME="${STANDARDISE_NAME:-false}"
 STANDARDISE_NAME_FORCE="${STANDARDISE_NAME_FORCE:-false}"
 STANDARDISE_SUFFIX="${STANDARDISE_SUFFIX:-_chr}"
@@ -37,8 +38,8 @@ DRY_RUN="${DRY_RUN:-false}"
 # Export flags consumed by helpers
 export REMOVE_MISSING="${REMOVE_MISSING:-false}"
 export MIN_VALID_GT_RATE
-export PANEL_OUT_DIR
-export MISSING_REPORT="${MISSING_REPORT:-${PANEL_OUT_DIR%/}/missing_sites_removed.tsv}"
+export PANEL_OUT_DIR="${PANEL_NOMISS_DIR}"
+export MISSING_REPORT="${MISSING_REPORT:-${PANEL_NOMISS_DIR%/}/missing_sites_removed.tsv}"
 export CHUNK_FILE="" # ensure normalize_panel_vcf contig warning is meaningful
 
 # Guardrails
@@ -70,7 +71,7 @@ if [[ -n "${FAIL_FLAG}" ]]; then
 fi
 
 # Ensure output directories exist
-mkdir -p "${PANEL_OUT_DIR}"
+mkdir -p "${PANEL_STANDARDISED_DIR}" "${PANEL_NOMISS_DIR}"
 
 # Tooling
 export BCFTOOLS_MODULE QUILT2_CONDA_ENV
@@ -199,7 +200,7 @@ EOF
 log_info "Phase 1: panel prep for ${CHR} (standardise=${STANDARDISE_NAME}, remove_missing=${REMOVE_MISSING}, min valid GT rate ${MIN_VALID_GT_RATE})"
 panel_source_dir="${REFERENCE_PANEL_DIR}"
 if [[ "${STANDARDISE_NAME}" == "true" ]]; then
-    std_vcf="$(standardize_panel_vcf "${CHR}" "${REFERENCE_PANEL_DIR}" "${PANEL_OUT_DIR}" "${STANDARDISE_SUFFIX}" "${STANDARDISE_NAME_FORCE}")" || exit 1
+    std_vcf="$(standardize_panel_vcf "${CHR}" "${REFERENCE_PANEL_DIR}" "${PANEL_STANDARDISED_DIR}" "${STANDARDISE_SUFFIX}" "${STANDARDISE_NAME_FORCE}")" || exit 1
     panel_source_dir="$(cd "$(dirname "${std_vcf}")" && pwd)"
 fi
 cleaned_vcf=""

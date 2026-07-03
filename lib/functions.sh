@@ -24,6 +24,30 @@ require_cmd() {
     fi
 }
 
+resolve_task_scratch_dir() {
+    local scratch_root="$1"
+    local fallback_root="$2"
+    local prefix="${3:-quilt2}"
+    local job_id="${SLURM_JOB_ID:-manual}"
+    local task_id="${SLURM_ARRAY_TASK_ID:-0}"
+    local base=""
+
+    if [[ -n "${scratch_root}" ]]; then
+        base="${scratch_root%/}"
+    elif [[ -n "${TMPDIR:-}" ]]; then
+        base="${TMPDIR%/}"
+    else
+        base="${fallback_root%/}/scratch"
+    fi
+
+    local task_dir="${base}/${prefix}_${job_id}_${task_id}"
+    mkdir -p "${task_dir}" || {
+        log_error "Failed to create scratch directory: ${task_dir}"
+        return 1
+    }
+    echo "${task_dir}"
+}
+
 if command -v module >/dev/null 2>&1; then
     module purge
 fi
@@ -147,6 +171,10 @@ pick_panel_vcf() {
     local best_any=""
 
     local -a candidates=(
+        "${reference_panel_dir}/nomiss/quilt.nomiss.${chr}.vcf.gz"
+        "${reference_panel_dir}/standardised/${chr}_chr.vcf.gz"
+        "${reference_panel_dir}/quilt.nomiss.${chr}.vcf.gz"
+        "${reference_panel_dir}/${chr}_chr.vcf.gz"
         "${reference_panel_dir}/apple_panel.refpol.${chr}.vcf.gz"
         "${reference_panel_dir}/panel.snps.clean__${chr}.vcf.gz"
         "${reference_panel_dir}/${chr}.vcf.gz"

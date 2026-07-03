@@ -14,11 +14,15 @@
 # Root of the QUILT2 pipeline checkout
 QUILT2_ROOT="${QUILT2_ROOT:-$HOME/QUILT2_Pipeline_KH_v1}"
 
-# Scratch base for work/slurm/log outputs
+# Scratch base for optional task staging
 QUILT2_SCRATCH_BASE="${QUILT2_SCRATCH_BASE:-/scratch/user/$(whoami)}"
 
-# Central log directory (defaults inside scratch if unset)
-QUILT2_LOG_BASE="${QUILT2_LOG_BASE:-${QUILT2_SCRATCH_BASE%/}/logs}"
+# Persistent pipeline output directory. If empty, defaults to <input-dir>/quilt2_output.
+QUILT2_OUTPUT_DIR="${QUILT2_OUTPUT_DIR:-}"
+
+# Optional scratch/staging root. If empty, array tasks use $TMPDIR when present,
+# otherwise <output-dir>/scratch. Do not store final results only in scratch.
+QUILT2_SCRATCH_DIR="${QUILT2_SCRATCH_DIR:-}"
 
 # -----------------------------------------------------------------------------
 # REFERENCES & RESOURCES
