@@ -266,7 +266,7 @@ normalize_panel_vcf() {
 
     if [[ "${remove_missing}" != "true" ]]; then
         local first_contig=""
-        first_contig=$(gzip -dc "${invcf}" 2>/dev/null | awk '!/^#/ {print $1; exit}')
+        first_contig=$(gzip -dc "${invcf}" 2>/dev/null | awk '!/^#/ {print $1; exit}') || true
         if [[ -n "${first_contig}" && -z "${chunk_file}" ]]; then
             log_warn "Detected contig name '${first_contig}' in ${invcf}. Ensure --chr/--region values match this naming."
         fi
@@ -317,7 +317,7 @@ EOF
     fi
 
     local first_contig=""
-    first_contig=$(gzip -dc "${cleaned_vcf}" 2>/dev/null | awk '!/^#/ {print $1; exit}')
+    first_contig=$(gzip -dc "${cleaned_vcf}" 2>/dev/null | awk '!/^#/ {print $1; exit}') || true
     if [[ -n "${first_contig}" && -z "${chunk_file}" ]]; then
         log_warn "Detected contig name '${first_contig}' in ${cleaned_vcf}. Ensure --chr/--region values match this naming."
     fi

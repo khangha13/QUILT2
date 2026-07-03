@@ -348,7 +348,7 @@ if [[ "${STANDARDISE_NAME}" != "true" && "${STANDARDISE_AUTODETECT}" == "true" ]
     for chr in "${CHR_LIST[@]}"; do
         panel_vcf="$(pick_panel_vcf "${REFERENCE_PANEL_DIR}" "${chr}")"
         [[ -z "${panel_vcf}" ]] && continue
-        first_contig="$(gzip -dc "${panel_vcf}" 2>/dev/null | awk '!/^#/ {print $1; exit}')"
+        first_contig="$(gzip -dc "${panel_vcf}" 2>/dev/null | awk '!/^#/ {print $1; exit}')" || true
         if [[ -n "${first_contig}" && "$(printf '%s' "${first_contig}" | tr '[:upper:]' '[:lower:]')" != chr* ]]; then
             log_info "Auto-detected non-Chr-prefixed contig '${first_contig}' in panel VCF for ${chr} (${panel_vcf}); enabling --standardise-name automatically."
             STANDARDISE_NAME="true"
