@@ -192,9 +192,9 @@ Rscript QUILT2_prepare_reference.R \
 |---|---|---|
 | `--nGen` | 100 | Effective number of generations since divergence from panel |
 | `--buffer` | 500000 bp | Overlap region on each side of a chunk |
-| `--outputdir` | `OUTPUT_DIR/prepared_reference/` | Where `.RData` objects are saved |
+| `--outputdir` | `OUTPUT_DIR/prepared_reference/` | Passed to QUILT2, which nests `.RData` objects under an `RData/` subdirectory of this path |
 
-**Output:** `OUTPUT_DIR/prepared_reference/QUILT_prepared_reference.Chr01.1.5000000.RData` (one per chunk)
+**Output:** `OUTPUT_DIR/prepared_reference/RData/QUILT_prepared_reference.Chr01.1.5000000.RData` (one per chunk)
 
 > This phase can be re-used across multiple imputation runs without re-running if the panel is unchanged. Use `--impute-only` to skip it.
 
@@ -219,7 +219,7 @@ Rscript QUILT2.R \
   --buffer 500000 \
   --nGen 100 \
   --bamlist bamlist.txt \
-  --reference_haplotype_file OUTPUT_DIR/prepared_reference/QUILT_prepared_reference.Chr01.1.5000000.RData
+  --reference_haplotype_file OUTPUT_DIR/prepared_reference/RData/QUILT_prepared_reference.Chr01.1.5000000.RData
 ```
 
 Output: a per-chunk VCF with imputed `GT`, `DS` (dosage), and `GP` (genotype probability) fields.
@@ -633,7 +633,8 @@ OUTPUT_DIR/
 │   └── nomiss/
 │       └── quilt.nomiss.<chr>.vcf.gz    # Missing-filtered panel, if requested
 ├── prepared_reference/
-│   └── QUILT_prepared_reference.<chr>.<start>.<end>.RData
+│   └── RData/
+│       └── QUILT_prepared_reference.<chr>.<start>.<end>.RData
 ├── chunks/
 │   ├── manifests/
 │   │   └── quilt2_chunks_<timestamp>.txt

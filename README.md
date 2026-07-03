@@ -148,7 +148,7 @@ export QUILT2_CONSTRAINT=epyc4
 Cache awareness (when changing inputs/settings):
 - Remove cached chunk manifests: `rm -f OUTPUT_DIR/chunks/manifests/quilt_auto_chunks.tsv`
 - Remove filtered panels: `rm -f OUTPUT_DIR/panel/nomiss/quilt.nomiss.*`
-- Remove prepared references: `rm -f OUTPUT_DIR/prepared_reference/QUILT_prepared_reference.*`
+- Remove prepared references: `rm -f OUTPUT_DIR/prepared_reference/RData/QUILT_prepared_reference.*`
 
 ## Output Layout
 Persistent outputs are organised under `OUTPUT_DIR`:
@@ -159,6 +159,7 @@ OUTPUT_DIR/
 │   ├── standardised/
 │   └── nomiss/
 ├── prepared_reference/
+│   └── RData/
 ├── chunks/
 │   ├── manifests/
 │   └── imputed/

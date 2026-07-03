@@ -113,7 +113,9 @@ prepare_reference_chunk() {
     local buffer="$4"
     local panel="$5"
 
-    local prepared_file="${RDATA_DIR%/}/QUILT_prepared_reference.${chr}.${start}.${end}.RData"
+    # QUILT2_prepare_reference.R always nests its output under an "RData"
+    # subdirectory of whatever --outputdir is given (not directly in outputdir).
+    local prepared_file="${RDATA_DIR%/}/RData/QUILT_prepared_reference.${chr}.${start}.${end}.RData"
     if [[ "${IMPUTE_ONLY}" == "true" ]]; then
         echo "${prepared_file}"
         return 0
