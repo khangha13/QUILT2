@@ -379,15 +379,42 @@ if [[ "${RUN_PHASE1}" == "true" ]]; then
         fi
         unset _fai_check
     fi
-    log_info "Phase 1: submitting panel prep array over ${#CHR_LIST[@]} chromosomes (standardise=${STANDARDISE_NAME}, remove_missing=${REMOVE_MISSING})"
-    rm -f "${NOMISS_FAIL_FLAG}"
-
     configured_array_limit="${CFG_ARRAY_MAX:-0}"
     PHASE1_CHR_LIST=( "${CHR_LIST[@]}" )
     if [[ "${configured_array_limit}" -gt 0 && "${#PHASE1_CHR_LIST[@]}" -gt "${configured_array_limit}" ]]; then
         log_warn "Phase 1 chromosome count (${#PHASE1_CHR_LIST[@]}) exceeds array cap (${configured_array_limit}); truncating manifest."
         PHASE1_CHR_LIST=( "${PHASE1_CHR_LIST[@]:0:${configured_array_limit}}" )
     fi
+
+    # Short-circuit: skip (re)submitting the Phase 1 array entirely if every
+    # chromosome's expected output already exists (e.g. on a pipeline rerun).
+    phase1_chr_ready() {
+        local chr="$1"
+        if [[ "${STANDARDISE_NAME}" == "true" ]]; then
+            local std="${PANEL_STANDARDISED_DIR%/}/${chr}_chr.vcf.gz"
+            [[ -s "${std}" && ( -f "${std}.csi" || -f "${std}.tbi" ) ]] || return 1
+        fi
+        if [[ "${REMOVE_MISSING}" == "true" ]]; then
+            local cleaned="${PANEL_NOMISS_DIR%/}/quilt.nomiss.${chr}.vcf.gz"
+            [[ -s "${cleaned}" && ( -f "${cleaned}.csi" || -f "${cleaned}.tbi" ) ]] || return 1
+        fi
+        return 0
+    }
+
+    PHASE1_ALREADY_DONE="true"
+    if [[ "${STANDARDISE_NAME_FORCE}" == "true" ]]; then
+        PHASE1_ALREADY_DONE="false"
+    else
+        for chr in "${PHASE1_CHR_LIST[@]}"; do
+            phase1_chr_ready "${chr}" || { PHASE1_ALREADY_DONE="false"; break; }
+        done
+    fi
+
+    if [[ "${PHASE1_ALREADY_DONE}" == "true" ]]; then
+        log_info "Phase 1 outputs already exist for all ${#PHASE1_CHR_LIST[@]} chromosomes; skipping Phase 1 submission."
+    else
+    log_info "Phase 1: submitting panel prep array over ${#CHR_LIST[@]} chromosomes (standardise=${STANDARDISE_NAME}, remove_missing=${REMOVE_MISSING})"
+    rm -f "${NOMISS_FAIL_FLAG}"
 
     nomiss_manifest="${CHUNK_MANIFEST_DIR}/quilt2_nomiss_chr_$(date +%Y%m%d_%H%M%S).txt"
     : > "${nomiss_manifest}"
@@ -463,6 +490,7 @@ EOF
         echo "${nomiss_job_id}" > "${LOG_DIR}/quilt2_nomiss_job_id.txt"
         log_info "Submitted Phase 1 array job ${nomiss_job_id} (script: ${NOMISS_SCRIPT})"
         wait_for_slurm_job "${nomiss_job_id}" "Phase 1 remove-missing" "${NOMISS_FAIL_FLAG}"
+    fi
     fi
 
     # Validate Phase 1 outputs before proceeding

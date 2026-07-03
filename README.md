@@ -143,6 +143,7 @@ export QUILT2_CONSTRAINT=epyc4
   - Filtered: `OUTPUT_DIR/panel/nomiss/quilt.nomiss.<chr>.vcf.gz` (+ index) when `--remove-missing`.
   - Job ID/logs: `OUTPUT_DIR/logs/quilt2_nomiss_job_id.txt`, `OUTPUT_DIR/logs/phase1_panel/quilt2_nomiss_%A_%a.(output|error)`.
 - Phase 2 (chunk array): uses `panel/nomiss/` if `--remove-missing` ran, `panel/standardised/` if only `--standardise-name` ran, otherwise the original panel dir. Uses `templates/quilt2_job.sh`. Job ID/logs: `OUTPUT_DIR/logs/quilt2_job_id.txt`, `OUTPUT_DIR/logs/phase2_chunks/quilt2_%A_%a.(output|error)`.
+- Phase 1 short-circuit: on a rerun, if every chromosome already has its expected standardised/filtered output (+ index), Phase 1 submission is skipped entirely (no `sbatch`, no wait). Use `--standardise-name-force` to force Phase 1 to resubmit and rebuild outputs regardless.
 - `--dry-run` prints the master sbatch command and exits; Phase 1/2 scripts are still generated for inspection.
 
 Cache awareness (when changing inputs/settings):
