@@ -42,7 +42,7 @@ Reference panel requirements:
 - The panel must be **phased** and contain phased `GT` values such as `0|0`, `0|1`, or `1|0`.
 - Panel VCFs should be split or named per chromosome. The script looks for names such as `apple_panel.refpol.Chr01.vcf.gz`, `panel.snps.clean__Chr01.vcf.gz`, `Chr01.vcf.gz`, or matching `Chr01_*.vcf.gz`, `Chr01.*.vcf.gz`, `Chr01-*.vcf.gz`.
 - VCFs must be bgzip-compressed and indexed (`.tbi` or `.csi`). The script tries to index `*.vcf.gz`, but pre-indexing avoids cluster-time failures.
-- Recommended chromosome naming is `Chr01`-`Chr17`. If the panel uses bare numeric contigs (`1`-`17`), add `--standardise-name` to create `ChrNN` panel VCFs in `OUTPUT_DIR/panel/standardised/`. If the panel uses another convention, pre-standardise it or make sure `--chr`, the panel VCFs, and genetic maps all use the same names.
+- Recommended chromosome naming is `Chr01`-`Chr17`. If the panel uses bare numeric contigs (`1`-`17`), the pipeline auto-detects this (by peeking at the first contig of each chromosome's panel VCF) and automatically renames them into `ChrNN` panel VCFs in `OUTPUT_DIR/panel/standardised/`. Pass `--standardise-name` to force this on regardless of detection, or `--no-standardise-name` to disable detection and always use the panel as-is. If the panel uses another convention, pre-standardise it or make sure `--chr`, the panel VCFs, and genetic maps all use the same names.
 - If panel variants contain missing or unphased genotypes, use `--remove-missing --min-valid-gt-rate <rate>` to create cleaned per-chromosome panel VCFs before imputation.
 
 ## Quick Start

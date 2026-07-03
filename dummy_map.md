@@ -173,7 +173,7 @@ with these naming patterns (in order):
 > - BAM file chromosome names (`@SQ SN:Chr01` or `@SQ SN:1`)
 > - The `--chr` argument passed to the pipeline
 
-If your VCF uses numeric names (`1`, `2`, ...) but BAMs use `Chr01`, `Chr02`, ..., you must either:
+If your VCF uses numeric names (`1`, `2`, ...) but BAMs use `Chr01`, `Chr02`, ..., `bin/run_quilt2.sh` auto-detects this by peeking at the first contig of each chromosome's panel VCF and automatically renames them (equivalent to `--standardise-name`) before imputation — see `README.md`. Pass `--no-standardise-name` if you'd rather manage naming yourself. To do it manually instead:
 
 1. **Rename VCF chromosomes** to match BAMs:
    ```bash

@@ -56,7 +56,10 @@ Core options:
   --prepare-only               Run prepare phase only
   --impute-only                Skip prepare; assumes prepared reference exists
   --dry-run                    Print commands without executing
-  --standardise-name           Create/use Chr01-style renamed VCFs (numeric -> ChrNN)
+  --standardise-name           Force-create/use Chr01-style renamed VCFs (numeric -> ChrNN).
+                                Auto-enabled by default when a panel VCF's contigs don't
+                                already start with "Chr" (peeked from --reference-panel-dir).
+  --no-standardise-name        Disable standardise-name auto-detection; never rename panel VCFs
   --standardise-name-force     Force re-run of renaming even if outputs exist
   --truth-vcf PATH             Optional truth VCF for evaluation
   --eval-output PATH           Optional evaluation output directory
@@ -102,6 +105,7 @@ IMPUTE_ONLY="${QUILT2_IMPUTE_ONLY:-false}"
 DRY_RUN="${QUILT2_DRY_RUN:-false}"
 STANDARDISE_NAME="${QUILT2_STANDARDISE_NAME:-false}"
 STANDARDISE_NAME_FORCE="${QUILT2_STANDARDISE_NAME_FORCE:-false}"
+STANDARDISE_AUTODETECT="true"
 BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}"
 QUILT2_CONDA_ENV="${QUILT2_CONDA_ENV:-quilt2}"
 
@@ -133,6 +137,7 @@ while [[ $# -gt 0 ]]; do
         --impute-only) IMPUTE_ONLY="true"; shift ;;
         --dry-run) DRY_RUN="true"; shift ;;
         --standardise-name) STANDARDISE_NAME="true"; shift ;;
+        --no-standardise-name) STANDARDISE_NAME="false"; STANDARDISE_AUTODETECT="false"; shift ;;
         --standardise-name-force) STANDARDISE_NAME_FORCE="true"; shift ;;
         --submit-self) SUBMIT_SELF="$2"; shift 2 ;;
         --no-submit|--submit-self=false) SUBMIT_SELF="false"; shift ;;
@@ -335,6 +340,22 @@ while IFS='=' read -r k v; do
         ARRAY_MAX) CFG_ARRAY_MAX="${v}" ;;
     esac
 done <<< "${config}"
+
+# Auto-detect whether panel VCFs need chromosome-name standardisation, unless the
+# user already forced --standardise-name or explicitly disabled detection with
+# --no-standardise-name.
+if [[ "${STANDARDISE_NAME}" != "true" && "${STANDARDISE_AUTODETECT}" == "true" ]]; then
+    for chr in "${CHR_LIST[@]}"; do
+        panel_vcf="$(pick_panel_vcf "${REFERENCE_PANEL_DIR}" "${chr}")"
+        [[ -z "${panel_vcf}" ]] && continue
+        first_contig="$(gzip -dc "${panel_vcf}" 2>/dev/null | awk '!/^#/ {print $1; exit}')"
+        if [[ -n "${first_contig}" && "$(printf '%s' "${first_contig}" | tr '[:upper:]' '[:lower:]')" != chr* ]]; then
+            log_info "Auto-detected non-Chr-prefixed contig '${first_contig}' in panel VCF for ${chr} (${panel_vcf}); enabling --standardise-name automatically."
+            STANDARDISE_NAME="true"
+            break
+        fi
+    done
+fi
 
 # Phase 1: panel prep (standardise and/or remove-missing) as a SLURM array (per chromosome)
 RUN_PHASE1="false"
