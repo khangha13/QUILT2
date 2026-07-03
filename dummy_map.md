@@ -4,6 +4,31 @@ When a real genetic/linkage map is not available for your species, you can creat
 a dummy map with a constant recombination rate. This allows QUILT2 to run, though
 imputation accuracy may be reduced compared to using a species-specific map.
 
+## Automatic Generation (Recommended)
+
+`bin/run_quilt2.sh` can generate the dummy maps for you. Pass `dummy` as the
+`--genetic-map` value and provide `--reference-fasta` with an existing `.fai`
+index:
+
+```bash
+bash bin/run_quilt2.sh \
+    -i /path/to/work_dir \
+    --reference-panel-dir /path/to/panel \
+    --genetic-map dummy \
+    --reference-fasta /path/to/reference.fasta \
+    --auto-chunk-map \
+    --bamlist bamlist.txt
+```
+
+This creates one file per chromosome in `CHR_LIST` at
+`OUTPUT_DIR/genetic_map/dummy/<chr>.txt`, using the same constant 1.0 cM/Mb,
+1000bp-step format described in Method 1 below (chromosome lengths come from
+the FASTA's `.fai` index). Files are only generated once; re-running the
+pipeline reuses existing files. If `--reference-fasta`/`.fai` is not
+available, or you want a different rate/step or the variant-anchored Method 2
+below, create maps manually with the scripts in this document and pass the
+resulting directory to `--genetic-map` instead.
+
 ## QUILT2 Genetic Map Format
 
 QUILT2 expects a **3-column space-delimited file**.

@@ -34,7 +34,7 @@ SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C 
 - `--reference-panel-dir`: directory containing the phased reference panel VCFs. This is required, unless `QUILT2_REFERENCE_PANEL_DIR` is set in `config/environment.sh`.
 - `--output-dir`: persistent output directory. Defaults to `WORK_DIR/quilt2_output`.
 - `--scratch-dir`: optional scratch/staging root. If omitted, SLURM tasks use `$TMPDIR` when available; otherwise they use `OUTPUT_DIR/scratch`. Scratch is for disposable task-local files only.
-- `--genetic-map`: genetic map file or directory with per-chromosome maps. Names must match the chromosome names used for the run (`Chr01` vs `1`, etc.). See `dummy_map.md` for creating maps when none are available.
+- `--genetic-map`: genetic map file or directory with per-chromosome maps. Names must match the chromosome names used for the run (`Chr01` vs `1`, etc.). Pass `dummy` to auto-generate constant 1.0 cM/Mb maps into `OUTPUT_DIR/genetic_map/dummy/` (requires `--reference-fasta` with a `.fai` index). See `dummy_map.md` for details and for creating maps manually when none are available.
 - Optional: `--reference-fasta` with `.fai` index, used during `--standardise-name` when VCF headers need contig repair.
 
 Reference panel requirements:

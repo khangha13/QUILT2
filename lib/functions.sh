@@ -161,6 +161,32 @@ resolve_genetic_map() {
     fi
 }
 
+# Generate a constant-rate (1.0 cM/Mb) dummy genetic map for one chromosome
+# args: chr, fai_path, outfile
+generate_dummy_genetic_map() {
+    local chr="$1"
+    local fai="$2"
+    local outfile="$3"
+
+    local len
+    len=$(awk -v c="${chr}" '$1==c{print $2}' "${fai}")
+    if [[ -z "${len}" ]]; then
+        log_error "Chromosome ${chr} not found in reference FASTA index: ${fai}"
+        return 1
+    fi
+
+    awk -v len="${len}" -v rate="1.0" -v step="1000" '
+        BEGIN {
+            print "position COMBINED_rate.cM.Mb. Genetic_Map.cM."
+            first_pos = step
+            for (p = step; p <= len; p += step) {
+                cM = (p - first_pos) / 1000000.0
+                printf "%d %.6f %.6f\n", p, rate, cM
+            }
+        }
+    ' > "${outfile}"
+}
+
 # Panel VCF selection with safe globbing (avoids chr1 vs chr10 collisions)
 pick_panel_vcf() {
     local reference_panel_dir="$1"

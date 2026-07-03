@@ -31,7 +31,9 @@ Usage:
 Required:
   -i, --input-dir PATH         Run/input folder; used for default bamlist discovery
   --reference-panel-dir PATH   Directory containing phased per-chromosome panel VCFs
-  --genetic-map PATH           Genetic map file or directory with per-chromosome maps
+  --genetic-map PATH|dummy     Genetic map file or directory with per-chromosome maps.
+                                Pass "dummy" to auto-generate constant 1.0 cM/Mb maps
+                                from --reference-fasta's .fai index into OUTPUT_DIR/genetic_map/dummy/
 
 Chunk specification (one of):
   --auto-chunk-map             Use QUILT::quilt_chunk_map (requires R pkg QUILT)
@@ -232,14 +234,41 @@ if [[ -z "${REFERENCE_PANEL_DIR}" ]]; then
 fi
 REFERENCE_PANEL_DIR="$(cd "${REFERENCE_PANEL_DIR}" && pwd)"
 
+CHR_LIST=("${DEFAULT_CHROMS[@]}")
+if [[ -n "${CHROM_ARG}" ]]; then
+    IFS=', ' read -r -a CHR_LIST <<< "${CHROM_ARG}"
+fi
+
+REFERENCE_FASTA_INDEX="${REFERENCE_FASTA_INDEX:-${REFERENCE_FASTA:+${REFERENCE_FASTA}.fai}}"
+
 if [[ -z "${GENETIC_MAP_FILE}" ]]; then
     log_error "Genetic map is required (--genetic-map or QUILT2_GENETIC_MAP)."
     exit 1
 fi
 
-# Determine if genetic map is a directory
+# Determine if genetic map is a directory, a file, or the "dummy" auto-generate sentinel
 GENETIC_MAP_IS_DIR="false"
-if [[ -d "${GENETIC_MAP_FILE}" ]]; then
+GENETIC_MAP_MODE="provided"
+if [[ "$(printf '%s' "${GENETIC_MAP_FILE}" | tr '[:upper:]' '[:lower:]')" == "dummy" ]]; then
+    GENETIC_MAP_MODE="dummy"
+    if [[ -z "${REFERENCE_FASTA_INDEX}" || ! -f "${REFERENCE_FASTA_INDEX}" ]]; then
+        log_error "--genetic-map dummy requires --reference-fasta with a .fai index (run: samtools faidx <ref.fasta>)."
+        exit 1
+    fi
+    DUMMY_MAP_DIR="${OUTPUT_DIR}/genetic_map/dummy"
+    mkdir -p "${DUMMY_MAP_DIR}"
+    log_info "Generating dummy genetic maps (constant 1.0 cM/Mb) in ${DUMMY_MAP_DIR}"
+    for chr in "${CHR_LIST[@]}"; do
+        dummy_file="${DUMMY_MAP_DIR}/${chr}.txt"
+        if [[ -s "${dummy_file}" ]]; then
+            log_info "Dummy map already exists for ${chr}; skipping."
+            continue
+        fi
+        generate_dummy_genetic_map "${chr}" "${REFERENCE_FASTA_INDEX}" "${dummy_file}" || exit 1
+    done
+    GENETIC_MAP_FILE="${DUMMY_MAP_DIR}"
+    GENETIC_MAP_IS_DIR="true"
+elif [[ -d "${GENETIC_MAP_FILE}" ]]; then
     GENETIC_MAP_IS_DIR="true"
     GENETIC_MAP_FILE="$(cd "${GENETIC_MAP_FILE}" && pwd)"
 elif [[ -f "${GENETIC_MAP_FILE}" ]]; then
@@ -306,11 +335,6 @@ while IFS='=' read -r k v; do
         ARRAY_MAX) CFG_ARRAY_MAX="${v}" ;;
     esac
 done <<< "${config}"
-
-CHR_LIST=("${DEFAULT_CHROMS[@]}")
-if [[ -n "${CHROM_ARG}" ]]; then
-    IFS=', ' read -r -a CHR_LIST <<< "${CHROM_ARG}"
-fi
 
 # Phase 1: panel prep (standardise and/or remove-missing) as a SLURM array (per chromosome)
 RUN_PHASE1="false"
@@ -610,6 +634,7 @@ SCRATCH_DISPLAY="${SCRATCH_DIR:-task TMPDIR or ${OUTPUT_DIR}/scratch}"
     printf "bamlist\t%s\n" "${BAMLIST:-<none>}"
     printf "genetic_map\t%s\n" "${GENETIC_MAP_FILE}"
     printf "genetic_map_is_dir\t%s\n" "${GENETIC_MAP_IS_DIR}"
+    printf "genetic_map_mode\t%s\n" "${GENETIC_MAP_MODE}"
     printf "chromosomes\t%s\n" "${CHR_LIST[*]}"
     printf "chunk_count\t%s\n" "${#CHUNKS[@]}"
     printf "chunk_manifest\t%s\n" "${MANIFEST_FILE}"
