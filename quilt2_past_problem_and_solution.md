@@ -403,6 +403,26 @@ bcftools view -t "chr:start_i-trimmed_end_i" -Oz -o trimmed.vcf.gz chunk_i.vcf.g
 
 ---
 
+## 17. `concat_imputed.sh`: "Cannot use --naive, incompatible headers" on genome-wide concat
+
+### Problem
+```
+Checking the headers of 17 files.
+Cannot use --naive, incompatible headers, the tag contig/Chr01 not present in .../Chr02/imputed.Chr02.vcf.gz
+```
+Per-chromosome concat (step before this) succeeds; only the final genome-wide concat fails.
+
+### Cause
+Each per-chunk QUILT2.R output VCF only declares the one chromosome it imputed in its header (`##contig=<ID=Chr01,...>` only, no other chromosomes). This carries through to the per-chromosome VCF built by `concat_imputed.sh` (all its input chunks share that same single-contig header, so `--naive` works fine there). But the genome-wide step concatenates 17 per-chromosome VCFs that each have a *different* single-contig header — `bcftools concat --naive` requires byte-identical headers across all inputs (it never touches the header, just glues compressed blocks), so it correctly refuses.
+
+### Fix
+Use plain `bcftools concat` (no `--naive`) for the genome-wide step only. Regular concat merges/unions headers across input files — this is its standard use case (stitching per-chromosome VCFs into one genome VCF) — while the per-chunk→per-chromosome step keeps `--naive` since those headers are truly identical (same chromosome).
+
+### Notes
+- Rule of thumb for `bcftools concat --naive`: only safe when every input file's header is byte-identical (typically: same chromosome/region, same pipeline run). Once inputs can have differing contig lists, samples, or any other header field, drop `--naive`.
+
+---
+
 ## Summary Checklist
 
 Before running QUILT2 pipeline, verify:

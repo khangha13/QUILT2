@@ -337,7 +337,11 @@ else
         genome_filelist="${TMP_DIR}/genome.filelist"
         printf '%s\n' "${CHR_OUTPUTS[@]}" > "${genome_filelist}"
         log_info "Concatenating ${#CHR_OUTPUTS[@]} chromosome VCFs -> ${FINAL_VCF}"
-        bcftools concat --naive -Oz -f "${genome_filelist}" -o "${FINAL_VCF}"
+        # Not --naive here: each per-chromosome VCF's header only declares its
+        # own contig (inherited from QUILT2.R's single-chromosome chunk output),
+        # so headers differ across files. Regular concat merges/unions headers;
+        # --naive requires byte-identical headers and rejects this.
+        bcftools concat -Oz -f "${genome_filelist}" -o "${FINAL_VCF}"
         bcftools index -f -c "${FINAL_VCF}"
     fi
 fi
