@@ -186,7 +186,7 @@ Post-imputation evaluation comparing imputed genotypes against a truth (array) V
 
 ### Scripts
 - `modules/evaluate/dosage_r2.sh` (bash) + `modules/evaluate/dosage_r2.R` (R/data.table/ggplot2).
-- `modules/evaluate/concat_imputed.sh` – stitches per-chunk imputed VCFs (`OUTPUT_DIR/chunks/imputed/<chr>/quilt2.diploid.<chr>.<start>-<end>.vcf.gz`) into per-chromosome and genome-wide VCFs, ordered via the run manifest (or numeric filename sort as a fallback).
+- `modules/evaluate/concat_imputed.sh` – stitches per-chunk imputed VCFs (`OUTPUT_DIR/chunks/imputed/<chr>/quilt2.diploid.<chr>.<start>-<end>.vcf.gz`) into per-chromosome and genome-wide VCFs, ordered via the run manifest (or numeric filename sort as a fallback). Adjacent chunks may overlap (e.g. `--auto-chunk-map`); each chunk is trimmed to end just before the next chunk's start before concatenating, so `bcftools index` on the result doesn't fail with "unsorted positions".
 - `bin/dosage_r2_sbatch.sh` – SLURM submit wrapper (recommended for cluster runs); accepts `--chunks-dir` as an alternative to `--imputed` to chain concatenation directly into evaluation.
 
 ### Environment

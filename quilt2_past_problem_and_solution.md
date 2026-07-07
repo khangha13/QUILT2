@@ -370,6 +370,39 @@ The pipeline now automatically creates a **tabix index** on the source VCF befor
 
 ---
 
+## 16. `concat_imputed.sh`: "Unsorted positions" when indexing concatenated per-chromosome VCF
+
+### Problem
+```
+Concatenating .../quilt2.diploid.Chr01.4990000-8990000.vcf.gz	0.007837 seconds
+Concatenating .../quilt2.diploid.Chr01.8980000-12980000.vcf.gz	0.006933 seconds
+[E::hts_idx_push] Unsorted positions on sequence #1: 8989860 followed by 8980005
+index: failed to create index for ".../imputed.Chr01.vcf.gz"
+```
+`bcftools concat --naive` succeeds (headers compatible, all files "concatenated"), but `bcftools index` on the result fails.
+
+### Cause
+Adjacent chunks are not just listed in the right order — their *content* overlaps. Chunk boundaries from `QUILT::quilt_chunk_map()` (`--auto-chunk-map`) share a small buffer between neighbors (e.g. chunk 1 = `1-5000000`, chunk 2 = `4990000-8990000`: a 10,000bp overlap). `templates/quilt2_job.sh` passes these directly as QUILT2.R's `--regionStart`/`--regionEnd`, and QUILT2.R writes out every variant across that full region — so both chunks independently call genotypes for the shared window. Naively concatenating full chunk files then places the tail of chunk *N* (higher positions, up to its end) immediately before the head of chunk *N+1* (lower positions, from its start), which is locally out-of-order — `bcftools index` correctly rejects this.
+
+This is **not** the same issue as #3 (scientific notation) or the earlier "chunk ordering" fix in `concat_imputed.sh` (manifest-based ordering). Ordering was already correct; the problem is overlapping *content* between correctly-ordered neighbors.
+
+### Fix
+`concat_imputed.sh` now trims each chunk to end just before the next chunk's start before concatenating, using the manifest's (or filename's) own start/end values — no hardcoded overlap size is assumed:
+```bash
+# For chunk i with (start_i, end_i) and next chunk's start_{i+1}:
+trimmed_end_i = min(end_i, start_{i+1} - 1)
+bcftools view -t "chr:start_i-trimmed_end_i" -Oz -o trimmed.vcf.gz chunk_i.vcf.gz
+```
+- Uses `bcftools view -t` (targets, streaming) rather than `-r` (regions), so no index is required on the raw per-chunk files.
+- If chunks don't actually overlap, `trimmed_end_i == end_i` and the original file is used unchanged (no-op, no extra `bcftools view` call).
+- The last chunk of a chromosome is never trimmed (no next chunk to overlap with).
+
+### Notes
+- This only affects concatenation of **overlapping-chunk** pipelines (e.g. `--auto-chunk-map`). Pipelines using non-overlapping/contiguous `--chunk-file` regions are unaffected (trim is a no-op).
+- If you ever see `bcftools index` complain about unsorted positions again after concatenation, check whether the chunk manifest's regions overlap before assuming it's a different bug.
+
+---
+
 ## Summary Checklist
 
 Before running QUILT2 pipeline, verify:
@@ -380,3 +413,4 @@ Before running QUILT2 pipeline, verify:
 4. ✅ **VCF files are indexed** (`.csi` or `.tbi` index files exist)
 5. ✅ **Delete cached files** when changing configuration
 6. ✅ **`--standardise-name`** auto-creates tabix index to handle VCFs with undefined contig headers
+7. ✅ **Overlapping chunks** (e.g. `--auto-chunk-map`) are safe to concatenate via `modules/evaluate/concat_imputed.sh`, which trims each chunk's overlap before concatenating

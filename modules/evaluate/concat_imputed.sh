@@ -17,6 +17,14 @@
 # filenames by their start coordinate when no manifest is found — chunk start
 # coordinates are not zero-padded, so a plain lexical/glob sort would not
 # match genomic order.
+#
+# Adjacent chunks commonly overlap (e.g. QUILT::quilt_chunk_map()-derived
+# chunks share a small boundary buffer), and each chunk's VCF contains every
+# variant across its full regionStart-regionEnd, including that overlap. This
+# script trims each chunk to end just before the next chunk's start (based on
+# manifest/filename boundaries, not a guessed overlap size) before
+# concatenating, so positions stay non-decreasing and `bcftools index` on the
+# result succeeds.
 
 set -euo pipefail
 
@@ -179,8 +187,9 @@ log_info "Chromosomes in scope: ${CHR_LIST[*]}"
 # CHUNK ORDERING
 # =============================================================================
 
-# Writes the ordered list of chunk VCF paths for one chromosome to stdout.
-# Exit status: 0 = ok (paths printed), 1 = no chunks found for this chromosome,
+# Writes the ordered list of chunks for one chromosome to stdout as
+# "start\tend\tpath" lines (start/end kept so the caller can trim overlaps).
+# Exit status: 0 = ok (rows printed), 1 = no chunks found for this chromosome,
 # 2 = manifest lists chunks that are missing on disk (hard error, already logged).
 build_chr_filelist() {
     local chr="$1"
@@ -194,7 +203,7 @@ build_chr_filelist() {
             [[ "${m_chr}" == "${chr}" ]] || continue
             f="${chr_dir}/quilt2.diploid.${chr}.${start}-${end}.vcf.gz"
             if [[ -s "${f}" ]]; then
-                lines+=( "${f}" )
+                lines+=( "${start}"$'\t'"${end}"$'\t'"${f}" )
             else
                 missing+=( "${f}" )
             fi
@@ -223,10 +232,51 @@ build_chr_filelist() {
         return 1
     fi
     for f in "${files[@]}"; do
-        local start
-        start="$(basename "${f}" | awk -F'[.-]' '{print $4}')"
-        printf '%s\t%s\n' "${start}" "${f}"
-    done | sort -k1,1n | cut -f2-
+        local start end
+        read -r start end < <(basename "${f}" | awk -F'[.-]' '{print $4, $5}')
+        printf '%s\t%s\t%s\n' "${start}" "${end}" "${f}"
+    done | sort -k1,1n
+    return 0
+}
+
+# Given ordered "start\tend\tpath" chunk rows for one chromosome, trims each
+# chunk's end to stop just before the next chunk's start (no-op if chunks
+# don't actually overlap), writing the resulting (possibly-trimmed) VCF paths
+# to stdout in order, ready for `bcftools concat --naive -f`.
+trim_overlaps() {
+    local chr="$1"
+    local rows_file="$2"
+    local -a starts=() ends=() paths=()
+    local start end path
+
+    while IFS=$'\t' read -r start end path; do
+        starts+=( "${start}" )
+        ends+=( "${end}" )
+        paths+=( "${path}" )
+    done < "${rows_file}"
+
+    local n="${#paths[@]}"
+    local i trimmed_end
+    for (( i = 0; i < n; i++ )); do
+        trimmed_end="${ends[i]}"
+        if (( i + 1 < n )) && (( starts[i+1] - 1 < trimmed_end )); then
+            trimmed_end=$(( starts[i+1] - 1 ))
+        fi
+
+        if (( trimmed_end < starts[i] )); then
+            log_error "Overlap trimming left an empty region for ${chr} chunk ${starts[i]}-${ends[i]}; chunk manifest may be malformed."
+            return 1
+        fi
+
+        if (( trimmed_end < ends[i] )); then
+            local trimmed_path="${TMP_DIR}/${chr}.chunk_$(printf '%03d' "${i}").trimmed.vcf.gz"
+            log_info "Trimming overlap for ${chr} chunk ${starts[i]}-${ends[i]} -> ${starts[i]}-${trimmed_end} (next chunk starts at $(( trimmed_end + 1 )))"
+            bcftools view -t "${chr}:${starts[i]}-${trimmed_end}" -Oz -o "${trimmed_path}" "${paths[i]}"
+            echo "${trimmed_path}"
+        else
+            echo "${paths[i]}"
+        fi
+    done
     return 0
 }
 
@@ -246,9 +296,9 @@ for chr in "${CHR_LIST[@]}"; do
         continue
     fi
 
-    filelist_file="${TMP_DIR}/${chr}.filelist"
+    rows_file="${TMP_DIR}/${chr}.rows.tsv"
     status=0
-    build_chr_filelist "${chr}" > "${filelist_file}" || status=$?
+    build_chr_filelist "${chr}" > "${rows_file}" || status=$?
     if [[ "${status}" -eq 1 ]]; then
         log_warn "No chunk VCFs found for ${chr}; skipping."
         continue
@@ -256,7 +306,10 @@ for chr in "${CHR_LIST[@]}"; do
         exit 1
     fi
 
-    n_chunks="$(wc -l < "${filelist_file}" | tr -d ' ')"
+    n_chunks="$(wc -l < "${rows_file}" | tr -d ' ')"
+    filelist_file="${TMP_DIR}/${chr}.filelist"
+    trim_overlaps "${chr}" "${rows_file}" > "${filelist_file}" || exit 1
+
     mkdir -p "${chr_out_dir}"
     log_info "Concatenating ${n_chunks} chunk(s) for ${chr} -> ${chr_output}"
     bcftools concat --naive -Oz -f "${filelist_file}" -o "${chr_output}"
