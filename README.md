@@ -10,6 +10,7 @@ SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C 
 - `lib/functions.sh` – shared helpers (env bootstrap, bcftools/QUILT checks, panel/map resolution).
 - `config/quilt2_config.sh` – SLURM defaults (account/partition/qos/resources/array cap).
 - `config/environment.template.sh` – site-specific environment template; copy to `config/environment.sh` and customise.
+- `modules/evaluate/concat_imputed.sh` – stitches per-chunk imputed VCFs into per-chromosome/genome-wide VCFs.
 - `modules/evaluate/dosage_r2.sh` – post-imputation evaluation (concordance & dosage r/r²).
 - `modules/evaluate/dosage_r2.R` – R companion script for metrics computation and plots.
 - `quilt2_pipeline.legacy.sh` – pre-array monolithic script (kept only for rollback).
@@ -185,7 +186,8 @@ Post-imputation evaluation comparing imputed genotypes against a truth (array) V
 
 ### Scripts
 - `modules/evaluate/dosage_r2.sh` (bash) + `modules/evaluate/dosage_r2.R` (R/data.table/ggplot2).
-- `bin/dosage_r2_sbatch.sh` – SLURM submit wrapper (recommended for cluster runs).
+- `modules/evaluate/concat_imputed.sh` – stitches per-chunk imputed VCFs (`OUTPUT_DIR/chunks/imputed/<chr>/quilt2.diploid.<chr>.<start>-<end>.vcf.gz`) into per-chromosome and genome-wide VCFs, ordered via the run manifest (or numeric filename sort as a fallback).
+- `bin/dosage_r2_sbatch.sh` – SLURM submit wrapper (recommended for cluster runs); accepts `--chunks-dir` as an alternative to `--imputed` to chain concatenation directly into evaluation.
 
 ### Environment
 Loads `miniforge/25.3.0-3` and bcftools modules. Activates conda env `CONDA_ENV` (default `myenv_py310`); override with `CONDA_ENV`, `MINIFORGE_MODULE`, or `BCFTOOLS_MODULE` environment variables.
@@ -256,3 +258,11 @@ bash bin/dosage_r2_sbatch.sh \
   --out-prefix results/dosage_eval \
   -- --region Chr01:1-1e6 --samples common_samples.txt
 ```
+
+Straight from raw chunk output (concatenates via `modules/evaluate/concat_imputed.sh` first, then evaluates):
+```bash
+bash bin/dosage_r2_sbatch.sh \
+  --chunks-dir OUTPUT_DIR/chunks/imputed \
+  --truth /path/truth.vcf.gz
+```
+`--out-prefix` defaults to `OUTPUT_DIR/eval/dosage_eval` in this mode; add `--chr LIST` to restrict chromosomes or `--concat-force` to re-concatenate existing outputs.

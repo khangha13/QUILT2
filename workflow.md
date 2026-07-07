@@ -1,7 +1,7 @@
 # QUILT2 Imputation Pipeline — Detailed Workflow
 
 > **Visual overview:** `workflow_diagram.html` in the repository root renders an interactive metromap diagram.
-> **Evaluation tools:** `modules/evaluate/dosage_r2.sh` → `modules/evaluate/dosage_r2.R`, plus `utils/test_concordance_check_with_array_validation.sh` for sample-identity matching against array truth.
+> **Evaluation tools:** `modules/evaluate/concat_imputed.sh` (stitch chunk VCFs) → `modules/evaluate/dosage_r2.sh` → `modules/evaluate/dosage_r2.R`, plus `utils/test_concordance_check_with_array_validation.sh` for sample-identity matching against array truth.
 
 ---
 
@@ -63,6 +63,7 @@ QUILT2_Pipeline_KH_v1/
 │   └── functions.sh             # Shared bash helper functions
 ├── modules/
 │   └── evaluate/
+│       ├── concat_imputed.sh    # Stitch per-chunk imputed VCFs into per-chr/genome-wide VCFs
 │       ├── dosage_r2.sh         # Evaluation pipeline (bash) — called by bin/dosage_r2_sbatch.sh
 │       └── dosage_r2.R          # R metrics, r/r², concordance, and plots
 ├── templates/
@@ -226,14 +227,15 @@ Output: a per-chunk VCF with imputed `GT`, `DS` (dosage), and `GP` (genotype pro
 
 ### 4b. Concatenation
 
-Once all chunk jobs for a chromosome complete, per-chunk VCFs are available under `OUTPUT_DIR/chunks/imputed/<chr>/`. If you concatenate them downstream:
+Once all chunk jobs for a chromosome complete, per-chunk VCFs are available under `OUTPUT_DIR/chunks/imputed/<chr>/`. Chunk start coordinates are **not** zero-padded, so a naive filename glob/sort does not match genomic order (e.g. `"20000001-..."` sorts before `"5000001-..."`). Use `modules/evaluate/concat_imputed.sh` instead, which orders chunks from the run manifest (falling back to numeric-sorted filename parsing if no manifest is available) and checks for missing chunks before concatenating:
 
 ```bash
-bcftools concat --naive -Oz \
-  -o OUTPUT_DIR/chunks/imputed/Chr01/imputed.Chr01.vcf.gz \
-  OUTPUT_DIR/chunks/imputed/Chr01/quilt2.diploid.Chr01.*.vcf.gz
-tabix -p vcf OUTPUT_DIR/chunks/imputed/Chr01/imputed.Chr01.vcf.gz
+bash modules/evaluate/concat_imputed.sh \
+  --chunks-dir OUTPUT_DIR/chunks/imputed \
+  --chr Chr01
 ```
+
+This prints the resulting VCF path (`OUTPUT_DIR/chunks/imputed/Chr01/imputed.Chr01.vcf.gz`) to stdout; omit `--chr` to concatenate every chromosome and also produce a genome-wide `OUTPUT_DIR/chunks/imputed/imputed.all_chroms.vcf.gz`. See [Stage 5](#7-stage-5--evaluation-optional) for how this is chained directly into evaluation via `bin/dosage_r2_sbatch.sh --chunks-dir`.
 
 **Per-chunk output:** `quilt2.diploid.<chr>.<start>-<end>.vcf.gz` — one VCF per chunk.
 
@@ -268,6 +270,16 @@ bash bin/dosage_r2_sbatch.sh \
   --out-prefix results/eval/Chr01 \
   -- --samples sample_list.txt --use-vcfpp --no-parquet
 ```
+
+Alternatively, pass `--chunks-dir` (instead of `--imputed`) to go straight from raw Phase 2 chunk output to evaluation in a single submission — `dosage_r2_sbatch.sh` runs `modules/evaluate/concat_imputed.sh` first (see [4b](#4b-concatenation)) and feeds its output into `dosage_r2.sh`:
+
+```bash
+bash bin/dosage_r2_sbatch.sh \
+  --chunks-dir OUTPUT_DIR/chunks/imputed \
+  --truth      array_truth.vcf.gz
+```
+
+`--out-prefix` defaults to `OUTPUT_DIR/eval/dosage_eval` in this mode (`OUTPUT_DIR` resolved from `run_manifest.tsv`, two levels up from `--chunks-dir`). Add `--chr LIST` to restrict to specific chromosomes, or `--concat-force` to re-concatenate even if the concat outputs already exist.
 
 The evaluation truth VCF is expected to use array-style genotype coding where GT index `0` means allele `A` and GT index `1` means allele `B`. The truth-side decoder does not derive A/B labels from truth REF/ALT nucleotides.
 
