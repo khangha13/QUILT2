@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # Compares an imputed VCF against a truth (array) VCF to compute per-variant
-# dosage r², genotype concordance, and MAF-binned summaries.
+# dosage r², genotype concordance, and per-sample metrics.
 #
 # Pipeline overview:
 #   1. Normalize contig names to canonical ChrNN format
@@ -17,11 +17,11 @@
 #          {A,T} → A  |  {C,G} → B
 #        Truth: GT index 0 → A, GT index 1 → B; REF/ALT are kept only for
 #        filtering/QC and are not used to decode truth genotypes.
-#   6. Feed A/B genotype TSVs to R for r², concordance, and plots
+#   6. Feed A/B genotype TSVs to R for r², concordance, and per-sample metrics
 #
 # Dosages are derived from GT fields only; DS/GP tags are not used.
-# Outputs include per-variant metrics, MAF-bin summaries, a per-site/per-sample
-# concordance matrix in Parquet (unless disabled), and diagnostic plots.
+# Outputs include per-sample metrics and a per-site/per-sample concordance matrix in
+# Parquet (unless disabled).
 
 set -euo pipefail
 
@@ -50,7 +50,9 @@ Required:
   --imputed PATH        Imputed VCF/BCF (raw WGS-style genotypes)
   --truth PATH          Truth VCF/BCF using array A/B genotype coding; GT used
                         as reference (0 -> A, 1 -> B)
-  --out-prefix PREFIX   Output prefix for metrics/plots (e.g., results/dosage_eval)
+  --out-prefix PATH     Eval run directory (e.g., results/dosage_eval). Deliverables
+                        (per_sample_metrics.tsv, concordance.parquet) are written here;
+                        checkpoints and QC files go under intermediate/.
 
 Options:
   --samples FILE        File with sample IDs to evaluate (one per line).
@@ -59,7 +61,6 @@ Options:
   --use-vcfpp           Additionally run vcfppR comparison on unambiguous VCFs.
   --no-parquet          Skip writing the concordance Parquet file.
   --no-biallelic-only   Do not restrict to biallelic SNPs (default: restrict).
-  --no-plots            Skip plotting; only produce metric TSVs.
   --force               Re-run all steps even if output files already exist.
   --keep-temp           Do not delete the temporary working directory.
   --help                Show this message and exit.
@@ -99,35 +100,29 @@ Skip Checks:
   system — no sentinel files are needed or checked.
   Use --force to delete all step outputs and re-run everything from scratch.
   To re-run a single step, delete its output files and re-run the script, e.g.:
-    rm PREFIX.IMPUTED_overlapped_only.vcf.gz PREFIX.TRUTH_overlapped_only.vcf.gz
-  A human-readable audit log (PREFIX.pipeline_audit.tsv) is appended after each
+    rm EVAL_DIR/intermediate/vcfs/IMPUTED_overlapped_only.vcf.gz EVAL_DIR/intermediate/vcfs/TRUTH_overlapped_only.vcf.gz
+  A human-readable audit log (EVAL_DIR/intermediate/qc/pipeline_audit.tsv) is appended after each
   completed step, recording the timestamp and key variant counts.
 
-Outputs (PREFIX.*):
-  IMPUTED_overlapped_only.vcf.gz              Imputed VCF at common positions (deduped)
-  TRUTH_overlapped_only.vcf.gz                Truth VCF at common positions (deduped)
-  IMPUTED_overlapped_unambiguous_only.vcf.gz  Imputed VCF after removing ambiguous loci
-  TRUTH_overlapped_unambiguous_only.vcf.gz    Truth VCF after removing ambiguous loci
-  duplicates_removed.imputed.tsv              Duplicate positions removed from imputed VCF
-  duplicates_removed.truth.tsv                Duplicate positions removed from truth VCF
-  ambiguous_loci_removed.tsv                  Strand-ambiguous positions that were removed
-  imputed.AB_format.tsv                       Imputed genotypes in A/B format
-  truth.AB_format.tsv                         Truth genotypes in A/B format
-  translation_exceptions.tsv                  Unexpected GTs encountered during imputed or truth genotype decoding
-  metrics.tsv                                 Per-variant r², concordance, MAF
-  per_sample_metrics.tsv                      Per-sample r², concordance, variant count
-  summary.tsv                                 Overall summary statistics
-  maf_bins.tsv                                Metrics aggregated by MAF bins
-  concordance.parquet                         Per-site per-sample concordance (0/1/NA)
-  r2_hist.png                                 Distribution of r² (if plots enabled)
-  concordance_hist.png                        Distribution of concordance (if plots enabled)
-  r2_vs_maf.png                               r² vs MAF heatmap (if plots enabled)
-  r2_vs_maf_line.png                          Mean r² vs MAF line plot (0.01 bins)
-  r2_vs_maf_line.tsv                          Underlying binned data for the MAF line plot
-  r2_per_chr_1Mb.png                          Mean r² per 1 Mb window, faceted by chromosome
-  r2_per_chr_1Mb.tsv                          Underlying binned data for the per-chr plot
-  r2_per_sample.png                           Per-sample r² bar chart (sorted ascending)
-  pipeline_audit.tsv                         Append-only log: step name, timestamp, counts
+Outputs under EVAL_DIR (e.g. results/dosage_eval):
+  per_sample_metrics.tsv                      Per-sample r² (deliverable, run root)
+  concordance.parquet                         Per-site per-sample concordance (run root)
+  intermediate/vcfs/
+    IMPUTED_overlapped_only.vcf.gz              Imputed VCF at common positions (deduped)
+    TRUTH_overlapped_only.vcf.gz                Truth VCF at common positions (deduped)
+    IMPUTED_overlapped_unambiguous_only.vcf.gz  Imputed VCF after removing ambiguous loci
+    TRUTH_overlapped_unambiguous_only.vcf.gz    Truth VCF after removing ambiguous loci
+  intermediate/ab/
+    imputed.AB_format.tsv                       Imputed genotypes in A/B format
+    truth.AB_format.tsv                         Truth genotypes in A/B format
+  intermediate/qc/
+    common_samples.txt                          Sample IDs evaluated
+    duplicates_removed.imputed.tsv              Duplicate positions removed from imputed VCF
+    duplicates_removed.truth.tsv                Duplicate positions removed from truth VCF
+    ambiguous_loci_removed.tsv                  Strand-ambiguous positions that were removed
+    translation_exceptions.tsv                  Unexpected GTs during A/B decoding
+    pipeline_audit.tsv                          Append-only step log (timestamp, counts)
+    vcfpp.rds / vcfpp.r2.tsv                    Optional (--use-vcfpp only)
 EOF
 }
 
@@ -141,7 +136,6 @@ OUT_PREFIX=""
 SAMPLE_FILE=""
 REGION=""
 BIALLELIC_ONLY=true
-RUN_PLOTS=true
 KEEP_TEMP=false
 USE_VCFPP=false
 WRITE_PARQUET=true
@@ -157,7 +151,6 @@ while [[ $# -gt 0 ]]; do
         --use-vcfpp)      USE_VCFPP=true; shift ;;
         --no-parquet)     WRITE_PARQUET=false; shift ;;
         --no-biallelic-only) BIALLELIC_ONLY=false; shift ;;
-        --no-plots)       RUN_PLOTS=false; shift ;;
         --force)          FORCE=true; shift ;;
         --keep-temp)      KEEP_TEMP=true; shift ;;
         --help|-h)        usage; exit 0 ;;
@@ -203,7 +196,13 @@ fi
 OUT_DIR="$(cd "$(dirname "${OUT_PREFIX}")" && pwd)"
 OUT_BASENAME="$(basename "${OUT_PREFIX}")"
 OUT_PREFIX="${OUT_DIR}/${OUT_BASENAME}"
-mkdir -p "${OUT_DIR}"
+
+EVAL_DIR="${OUT_PREFIX}"
+INTER_DIR="${EVAL_DIR}/intermediate"
+INTER_VCF_DIR="${INTER_DIR}/vcfs"
+INTER_AB_DIR="${INTER_DIR}/ab"
+INTER_QC_DIR="${INTER_DIR}/qc"
+mkdir -p "${EVAL_DIR}" "${INTER_VCF_DIR}" "${INTER_AB_DIR}" "${INTER_QC_DIR}"
 
 # =============================================================================
 # TEMPORARY DIRECTORY + CLEANUP
@@ -269,7 +268,7 @@ ensure_rscript() {
         return 1
     fi
     log_warn "Rscript not found; installing R into conda env '${CONDA_ENV}'"
-    if ! conda install -y r-base r-data.table r-ggplot2 r-arrow; then
+    if ! conda install -y r-base r-data.table r-arrow; then
         log_error "Failed to install R packages into conda env '${CONDA_ENV}'."
         return 1
     fi
@@ -298,27 +297,28 @@ maybe_index "${TRUTH_VCF}"
 # OUTPUT FILE PATHS (defined once, used for skip-checks and saving)
 # =============================================================================
 
-IMPUTED_OVERLAP_OUT="${OUT_PREFIX}.IMPUTED_overlapped_only.vcf.gz"
-TRUTH_OVERLAP_OUT="${OUT_PREFIX}.TRUTH_overlapped_only.vcf.gz"
-IMPUTED_DUP_REPORT="${OUT_PREFIX}.duplicates_removed.imputed.tsv"
-TRUTH_DUP_REPORT="${OUT_PREFIX}.duplicates_removed.truth.tsv"
+IMPUTED_OVERLAP_OUT="${INTER_VCF_DIR}/IMPUTED_overlapped_only.vcf.gz"
+TRUTH_OVERLAP_OUT="${INTER_VCF_DIR}/TRUTH_overlapped_only.vcf.gz"
+IMPUTED_DUP_REPORT="${INTER_QC_DIR}/duplicates_removed.imputed.tsv"
+TRUTH_DUP_REPORT="${INTER_QC_DIR}/duplicates_removed.truth.tsv"
 
-IMPUTED_UNAMBIG_OUT="${OUT_PREFIX}.IMPUTED_overlapped_unambiguous_only.vcf.gz"
-TRUTH_UNAMBIG_OUT="${OUT_PREFIX}.TRUTH_overlapped_unambiguous_only.vcf.gz"
-AMBIG_REPORT="${OUT_PREFIX}.ambiguous_loci_removed.tsv"
+IMPUTED_UNAMBIG_OUT="${INTER_VCF_DIR}/IMPUTED_overlapped_unambiguous_only.vcf.gz"
+TRUTH_UNAMBIG_OUT="${INTER_VCF_DIR}/TRUTH_overlapped_unambiguous_only.vcf.gz"
+AMBIG_REPORT="${INTER_QC_DIR}/ambiguous_loci_removed.tsv"
 
-IMPUTED_AB_TSV="${OUT_PREFIX}.imputed.AB_format.tsv"
-TRUTH_AB_TSV="${OUT_PREFIX}.truth.AB_format.tsv"
-EXCEPTION_REPORT="${OUT_PREFIX}.translation_exceptions.tsv"
+IMPUTED_AB_TSV="${INTER_AB_DIR}/imputed.AB_format.tsv"
+TRUTH_AB_TSV="${INTER_AB_DIR}/truth.AB_format.tsv"
+EXCEPTION_REPORT="${INTER_QC_DIR}/translation_exceptions.tsv"
 
-METRICS_TSV="${OUT_PREFIX}.metrics.tsv"
-COMMON_SAMPLES_OUT="${OUT_PREFIX}.common_samples.txt"
+PER_SAMPLE_METRICS_TSV="${EVAL_DIR}/per_sample_metrics.tsv"
+CONCORDANCE_PARQUET="${EVAL_DIR}/concordance.parquet"
+COMMON_SAMPLES_OUT="${INTER_QC_DIR}/common_samples.txt"
 
 # --- Run audit log ---
 # A single append-only TSV that records each completed step: when it ran and
 # what it produced. Never read by the pipeline — purely for human inspection.
 # The skip decision is made solely from the output files (see step_done below).
-PIPELINE_AUDIT_LOG="${OUT_PREFIX}.pipeline_audit.tsv"
+PIPELINE_AUDIT_LOG="${INTER_QC_DIR}/pipeline_audit.tsv"
 
 if [[ "${FORCE}" == "true" ]]; then
     log_warn "--force: deleting all step output files to trigger a full re-run"
@@ -327,7 +327,9 @@ if [[ "${FORCE}" == "true" ]]; then
     rm -f "${IMPUTED_UNAMBIG_OUT}" "${IMPUTED_UNAMBIG_OUT}.csi"
     rm -f "${TRUTH_UNAMBIG_OUT}"   "${TRUTH_UNAMBIG_OUT}.csi"
     rm -f "${IMPUTED_AB_TSV}" "${TRUTH_AB_TSV}"
-    rm -f "${METRICS_TSV}" "${COMMON_SAMPLES_OUT}"
+    rm -f "${PER_SAMPLE_METRICS_TSV}" "${CONCORDANCE_PARQUET}" "${COMMON_SAMPLES_OUT}"
+    rm -f "${IMPUTED_DUP_REPORT}" "${TRUTH_DUP_REPORT}" "${AMBIG_REPORT}" "${EXCEPTION_REPORT}"
+    rm -f "${PIPELINE_AUDIT_LOG}" "${INTER_QC_DIR}/vcfpp.rds" "${INTER_QC_DIR}/vcfpp.r2.tsv"
     log_warn "Cleared outputs; all steps will re-run"
 fi
 
@@ -973,18 +975,17 @@ fi  # end Step 5 skip-check
 # =============================================================================
 # STEP 6: COMPUTE METRICS VIA R
 # =============================================================================
-# Skip if metrics TSV already exists from a previous run.
+# Skip if per-sample metrics TSV already exists from a previous run.
 
-if step_done "${METRICS_TSV}"; then
-    log_info "[SKIP] Step 6: Metrics already exist"
-    log_info "  ${METRICS_TSV}"
+if step_done "${PER_SAMPLE_METRICS_TSV}"; then
+    log_info "[SKIP] Step 6: Per-sample metrics already exist"
+    log_info "  ${PER_SAMPLE_METRICS_TSV}"
 else
 
 # Feed the A/B format TSVs to the R helper script which:
 #   - Converts A/B genotypes to dosages (A/A=0, A/B=1, B/B=2)
-#   - Computes per-variant r², concordance, and MAF
-#   - Produces MAF-bin summaries
-#   - Writes a concordance parquet and diagnostic plots
+#   - Computes per-sample r² (overall and per 0.1 MAF bin)
+#   - Optionally writes a concordance parquet
 
 R_HELPER="${SCRIPT_DIR}/dosage_r2.R"
 if [[ ! -f "${R_HELPER}" ]]; then
@@ -997,9 +998,13 @@ R_ARGS=(
     "--imputed-gt" "${IMPUTED_AB_TSV}"
     "--truth-gt"   "${TRUTH_AB_TSV}"
     "--samples"    "${SAMPLE_SET}"
-    "--out-prefix" "${OUT_PREFIX}"
-    "--write-parquet" "${WRITE_PARQUET}"
+    "--eval-dir"   "${EVAL_DIR}"
+    "--per-sample-out" "${PER_SAMPLE_METRICS_TSV}"
 )
+
+if [[ "${WRITE_PARQUET}" == "true" ]]; then
+    R_ARGS+=( "--parquet-out" "${CONCORDANCE_PARQUET}" )
+fi
 
 if [[ "${USE_VCFPP}" == "true" ]]; then
     R_ARGS+=( "--use-vcfpp"
@@ -1007,14 +1012,10 @@ if [[ "${USE_VCFPP}" == "true" ]]; then
               "--vcfpp-truth"   "${TRUTH_UNAMBIG_OUT}" )
 fi
 
-if [[ "${RUN_PLOTS}" == "true" ]]; then
-    R_ARGS+=( "--plots" )
-fi
-
 log_info "Running R metrics helper"
 run_cmd Rscript "${R_ARGS[@]}"
-log_step_done "metrics" "metrics_file=${METRICS_TSV}"
+log_step_done "metrics" "per_sample_metrics=${PER_SAMPLE_METRICS_TSV}"
 
 fi  # end Step 6 skip-check
 
-log_info "Dosage r² and concordance metrics written to ${OUT_PREFIX}.*"
+log_info "Per-sample metrics written to ${PER_SAMPLE_METRICS_TSV}"

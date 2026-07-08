@@ -66,7 +66,8 @@ Core options:
 
 SLURM config (env-driven; see config/quilt2_config.sh):
   QUILT2_ACCOUNT, QUILT2_PARTITION, QUILT2_QOS, QUILT2_NODES, QUILT2_NTASKS,
-  QUILT2_CPUS_PER_TASK, QUILT2_MEMORY, QUILT2_TIME_LIMIT, QUILT2_ARRAY_MAX
+  QUILT2_CPUS_PER_TASK, QUILT2_MEMORY, QUILT2_TIME_LIMIT,
+  QUILT2_MASTER_TIME_LIMIT, QUILT2_ARRAY_MAX
 EOF
 }
 
@@ -201,6 +202,7 @@ NOMISS_FAIL_FLAG="${LOG_DIR}/quilt2_nomiss_failed.flag"
 
 if [[ "${SUBMIT_SELF}" == "true" && -z "${SLURM_JOB_ID:-}" ]]; then
     MASTER_SCRIPT="${SLURM_SCRIPT_DIR}/quilt2_master_$(date +%Y%m%d_%H%M%S).sh"
+    MASTER_TIME_LIMIT="${QUILT2_MASTER_TIME_LIMIT:-336:00:00}"
     args_quoted="$(printf " %q" "${ORIG_ARGS[@]}")"
     {
     cat <<EOF
@@ -208,6 +210,7 @@ if [[ "${SUBMIT_SELF}" == "true" && -z "${SLURM_JOB_ID:-}" ]]; then
 #SBATCH --job-name=Q2_MASTER
 #SBATCH --output=${SLURM_MASTER_LOG_DIR}/quilt2_master_%j.output
 #SBATCH --error=${SLURM_MASTER_LOG_DIR}/quilt2_master_%j.error
+#SBATCH --time=${MASTER_TIME_LIMIT}
 
 export QUILT2_ROOT="${QUILT2_ROOT}"
 
@@ -228,6 +231,7 @@ EOF
     fi
     echo "${master_job_id}" > "${LOG_DIR}/quilt2_master_job_id.txt"
     log_info "Submitted master job ${master_job_id}"
+    log_info "Master time limit: ${MASTER_TIME_LIMIT}"
     log_info "SLURM script: ${MASTER_SCRIPT}"
     log_info "SLURM logs:   ${SLURM_MASTER_LOG_DIR}/quilt2_master_%j.(output|error)"
     exit 0

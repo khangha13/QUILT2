@@ -185,7 +185,7 @@ See `quilt2_past_problem_and_solution.md` for fixes on genetic map columns, chr 
 Post-imputation evaluation comparing imputed genotypes against a truth (array) VCF.
 
 ### Scripts
-- `modules/evaluate/dosage_r2.sh` (bash) + `modules/evaluate/dosage_r2.R` (R/data.table/ggplot2).
+- `modules/evaluate/dosage_r2.sh` (bash) + `modules/evaluate/dosage_r2.R` (R/data.table).
 - `modules/evaluate/concat_imputed.sh` – stitches per-chunk imputed VCFs (`OUTPUT_DIR/chunks/imputed/<chr>/quilt2.diploid.<chr>.<start>-<end>.vcf.gz`) into per-chromosome and genome-wide VCFs, ordered via the run manifest (or numeric filename sort as a fallback). Adjacent chunks may overlap (e.g. `--auto-chunk-map`); each chunk is trimmed to end just before the next chunk's start before concatenating, so `bcftools index` on the result doesn't fail with "unsorted positions".
 - `bin/dosage_r2_sbatch.sh` – SLURM submit wrapper (recommended for cluster runs); accepts `--chunks-dir` as an alternative to `--imputed` to chain concatenation directly into evaluation.
 
@@ -199,7 +199,7 @@ Dosages are derived from GT fields only; DS/GP tags are not used. The pipeline:
 3. Deduplicates multi-allelic positions (`bcftools norm -d snps`).
 4. Removes strand-ambiguous loci (A/T, T/A, C/G, G/C) that cannot be reliably assigned to allele classes.
 5. Translates both VCFs to A/B format using AT/CG nucleotide grouping (A,T → group A; C,G → group B).
-6. Feeds A/B genotype TSVs to R for per-variant r (signed Pearson) and r², genotype concordance, MAF-binned summaries, per-sample metrics, and diagnostic plots.
+6. Feeds A/B genotype TSVs to R for per-sample r² (overall and per 0.1 MAF bin).
 
 ### Inputs
 - Imputed VCF and truth VCF (both with GT fields; both indexed).
@@ -210,33 +210,35 @@ Dosages are derived from GT fields only; DS/GP tags are not used. The pipeline:
 - `--use-vcfpp` – additionally run vcfppR comparison on unambiguous VCFs.
 - `--no-parquet` – skip writing the concordance Parquet file.
 - `--no-biallelic-only` – do not restrict to biallelic SNPs (default: restrict).
-- `--no-plots` – skip plotting; only produce metric TSVs.
 - `--force` – re-run all steps even if output files already exist.
 - `--keep-temp` – do not delete the temporary working directory.
 
-### Outputs (PREFIX.*)
+### Outputs (`EVAL_DIR/`, e.g. `eval/dosage_eval/`)
+
+Deliverables at the eval run root:
+
 | File | Description |
 |------|-------------|
-| `metrics.tsv` | Per-variant r (signed Pearson), r², concordance, MAF |
 | `per_sample_metrics.tsv` | Per-sample r and r², overall and per 0.1 MAF bin |
-| `summary.tsv` | Overall r_mean, r_median, r2_mean, r2_median, concordance_mean |
-| `maf_bins.tsv` | r_mean, r2_mean, concordance aggregated by MAF bins |
-| `concordance.parquet` | Per-site per-sample concordance (0/1/NA) |
-| `IMPUTED_overlapped_only.vcf.gz` | Imputed VCF at common positions (deduped) |
-| `TRUTH_overlapped_only.vcf.gz` | Truth VCF at common positions (deduped) |
-| `IMPUTED_overlapped_unambiguous_only.vcf.gz` | Imputed VCF after removing ambiguous loci |
-| `TRUTH_overlapped_unambiguous_only.vcf.gz` | Truth VCF after removing ambiguous loci |
-| `ambiguous_loci_removed.tsv` | Strand-ambiguous positions that were removed |
-| `duplicates_removed.{imputed,truth}.tsv` | Duplicate positions removed |
-| `imputed.AB_format.tsv` | Imputed genotypes in A/B format |
-| `truth.AB_format.tsv` | Truth genotypes in A/B format |
-| `translation_exceptions.tsv` | Unexpected GTs found during translation |
-| `r2_hist.png` | Distribution of r² |
-| `concordance_hist.png` | Distribution of concordance |
-| `r2_vs_maf.png` | r² vs MAF heatmap |
-| `r2_vs_maf_line.{png,tsv}` | Mean r² vs MAF line plot (0.01 bins) |
-| `r2_per_chr_1Mb.{png,tsv}` | Mean r² per 1 Mb window, faceted by chromosome |
-| `r2_per_sample.png` | Per-sample r² bar chart (sorted ascending by r²) |
+| `concordance.parquet` | Per-site per-sample concordance (0/1/NA); skip with `--no-parquet` |
+
+Intermediates under `intermediate/`:
+
+| Path | Description |
+|------|-------------|
+| `intermediate/vcfs/IMPUTED_overlapped_only.vcf.gz` | Imputed VCF at common positions (deduped) |
+| `intermediate/vcfs/TRUTH_overlapped_only.vcf.gz` | Truth VCF at common positions (deduped) |
+| `intermediate/vcfs/IMPUTED_overlapped_unambiguous_only.vcf.gz` | Imputed after removing ambiguous loci |
+| `intermediate/vcfs/TRUTH_overlapped_unambiguous_only.vcf.gz` | Truth after removing ambiguous loci |
+| `intermediate/ab/imputed.AB_format.tsv` | Imputed genotypes in A/B format |
+| `intermediate/ab/truth.AB_format.tsv` | Truth genotypes in A/B format |
+| `intermediate/qc/common_samples.txt` | Sample IDs evaluated |
+| `intermediate/qc/duplicates_removed.{imputed,truth}.tsv` | Duplicate positions removed |
+| `intermediate/qc/ambiguous_loci_removed.tsv` | Strand-ambiguous positions removed |
+| `intermediate/qc/translation_exceptions.tsv` | Unexpected GTs during A/B decoding |
+| `intermediate/qc/pipeline_audit.tsv` | Step log (timestamp, counts) |
+
+> **Breaking change:** older runs wrote flat `{prefix}.*` files next to the eval directory name. After upgrading, re-run with `--force` or delete legacy flat files; skip checks use the new `intermediate/` layout.
 
 ### Examples
 

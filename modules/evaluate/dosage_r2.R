@@ -2,8 +2,6 @@
 
 suppressPackageStartupMessages({
   library(data.table)
-  library(ggplot2)
-  library(scales)
 })
 
 args <- commandArgs(trailingOnly = TRUE)
@@ -15,17 +13,19 @@ parse_args <- function(args) {
     truth_gt = NULL,
     imputed_gp = NULL,
     samples = NULL,
-    out_prefix = NULL,
-    plots = FALSE,
+    eval_dir = NULL,
+    per_sample_out = NULL,
+    parquet_out = NULL,
     use_vcfpp = FALSE,
     vcfpp_imputed = NULL,
-    vcfpp_truth = NULL,
-    write_parquet = TRUE
+    vcfpp_truth = NULL
   )
   i <- 1
   while (i <= length(args)) {
     key <- args[[i]]
-    if (key %in% c("--imputed-ds", "--imputed-gt", "--truth-gt", "--imputed-gp", "--samples", "--out-prefix", "--vcfpp-imputed", "--vcfpp-truth", "--write-parquet")) {
+    if (key %in% c("--imputed-ds", "--imputed-gt", "--truth-gt", "--imputed-gp", "--samples",
+                   "--eval-dir", "--per-sample-out", "--parquet-out",
+                   "--vcfpp-imputed", "--vcfpp-truth")) {
       if (i == length(args)) stop(key, " requires a value")
       val <- args[[i + 1]]
       switch(key,
@@ -34,19 +34,23 @@ parse_args <- function(args) {
              "--truth-gt" = opts$truth_gt <- val,
              "--imputed-gp" = opts$imputed_gp <- val,
              "--samples" = opts$samples <- val,
-             "--out-prefix" = opts$out_prefix <- val,
+             "--eval-dir" = opts$eval_dir <- val,
+             "--per-sample-out" = opts$per_sample_out <- val,
+             "--parquet-out" = opts$parquet_out <- val,
              "--vcfpp-imputed" = opts$vcfpp_imputed <- val,
-             "--vcfpp-truth" = opts$vcfpp_truth <- val,
-             "--write-parquet" = opts$write_parquet <- val)
+             "--vcfpp-truth" = opts$vcfpp_truth <- val)
       i <- i + 2
-    } else if (key == "--plots") {
-      opts$plots <- TRUE
-      i <- i + 1
     } else if (key == "--use-vcfpp") {
       opts$use_vcfpp <- TRUE
       i <- i + 1
     } else if (key %in% c("--help", "-h")) {
-      cat("Usage: dosage_r2.R --imputed-gt <tsv> --truth-gt <tsv> --samples <file> --out-prefix <prefix> [--imputed-ds <tsv>] [--imputed-gp <tsv>] [--use-vcfpp --vcfpp-imputed <vcf> --vcfpp-truth <vcf>] [--write-parquet <true|false>] [--plots]\n")
+      cat(paste(
+        "Usage: dosage_r2.R --imputed-gt <tsv> --truth-gt <tsv> --samples <file>",
+        "--eval-dir <dir> --per-sample-out <path>",
+        "[--parquet-out <path>] [--imputed-ds <tsv>] [--imputed-gp <tsv>]",
+        "[--use-vcfpp --vcfpp-imputed <vcf> --vcfpp-truth <vcf>]\n",
+        sep = " "
+      ))
       quit(status = 0)
     } else {
       stop("Unknown argument: ", key)
@@ -55,14 +59,11 @@ parse_args <- function(args) {
   if (is.null(opts$imputed_gt) && is.null(opts$imputed_ds)) {
     stop("Provide --imputed-gt (preferred) or --imputed-ds")
   }
-  required <- c("truth_gt", "samples", "out_prefix")
+  required <- c("truth_gt", "samples", "eval_dir", "per_sample_out")
   missing <- required[sapply(required, function(k) is.null(opts[[k]]))]
   if (length(missing) > 0) stop("Missing required args: ", paste(missing, collapse = ", "))
   if (isTRUE(opts$use_vcfpp) && (is.null(opts$vcfpp_imputed) || is.null(opts$vcfpp_truth))) {
     stop("When --use-vcfpp is set, provide --vcfpp-imputed and --vcfpp-truth VCFs")
-  }
-  if (is.character(opts$write_parquet)) {
-    opts$write_parquet <- tolower(opts$write_parquet) %in% c("true", "1", "yes", "y")
   }
   opts
 }
@@ -147,14 +148,6 @@ gt_to_dosage <- function(gt_mat) {
   dosage
 }
 
-open_png <- function(path, width = 1600, height = 1200, res = 200) {
-  if (requireNamespace("ragg", quietly = TRUE)) {
-    ragg::agg_png(filename = path, width = width, height = height, units = "px", res = res)
-  } else {
-    grDevices::png(filename = path, width = width / res, height = height / res, units = "in", res = res)
-  }
-}
-
 calc_variant_metrics <- function(ds_row, truth_row) {
   keep <- !(is.na(ds_row) | is.na(truth_row))
   n_nonmiss <- sum(keep)
@@ -177,7 +170,7 @@ calc_variant_metrics <- function(ds_row, truth_row) {
   list(r = r, r2 = r2, concordance = conc, maf = maf, n = n_nonmiss)
 }
 
-write_concordance_parquet <- function(meta_dt, imputed_ds, truth_ds, sample_ids, out_prefix) {
+write_concordance_parquet <- function(meta_dt, imputed_ds, truth_ds, sample_ids, parquet_out) {
   if (!requireNamespace("arrow", quietly = TRUE)) {
     warning("arrow package not installed; skipping concordance parquet")
     return(invisible(NULL))
@@ -189,14 +182,15 @@ write_concordance_parquet <- function(meta_dt, imputed_ds, truth_ds, sample_ids,
   conc_mat[keep] <- as.numeric(imp_gt[keep] == truth_gt[keep])
   colnames(conc_mat) <- sample_ids
   conc_dt <- cbind(as.data.table(meta_dt), as.data.table(conc_mat))
-  arrow::write_parquet(conc_dt, sprintf("%s.concordance.parquet", out_prefix))
+  arrow::write_parquet(conc_dt, parquet_out)
 }
 
-run_vcfpp <- function(imputed_vcf, truth_vcf, out_prefix) {
+run_vcfpp <- function(imputed_vcf, truth_vcf, eval_dir) {
   if (!requireNamespace("vcfppR", quietly = TRUE)) {
     warning("vcfppR not installed; skipping vcfpp evaluation")
     return(invisible(NULL))
   }
+  qc_dir <- file.path(eval_dir, "intermediate", "qc")
   res <- tryCatch(
     vcfppR::vcfcomp(test = imputed_vcf, truth = truth_vcf, stats = "r2", formats = c("GT")),
     error = function(e) e
@@ -205,7 +199,7 @@ run_vcfpp <- function(imputed_vcf, truth_vcf, out_prefix) {
     warning("vcfppR::vcfcomp failed: ", conditionMessage(res))
     return(invisible(NULL))
   }
-  saveRDS(res, sprintf("%s.vcfpp.rds", out_prefix))
+  saveRDS(res, file.path(qc_dir, "vcfpp.rds"))
   dt <- NULL
   if (is.data.frame(res)) {
     dt <- as.data.table(res)
@@ -213,16 +207,8 @@ run_vcfpp <- function(imputed_vcf, truth_vcf, out_prefix) {
     dt <- tryCatch(as.data.table(res$stats), error = function(e) NULL)
   }
   if (!is.null(dt)) {
-    fwrite(dt, sprintf("%s.vcfpp.r2.tsv", out_prefix), sep = "\t")
+    fwrite(dt, file.path(qc_dir, "vcfpp.r2.tsv"), sep = "\t")
   }
-  pngfile <- sprintf("%s.vcfpp.r2.png", out_prefix)
-  open_png(pngfile)
-  tryCatch({
-    vcfppR::vcfplot(res, col = 2, cex = 1.5, lwd = 2, type = "b")
-  }, error = function(e) {
-    warning("vcfppR::vcfplot failed: ", conditionMessage(e))
-  })
-  grDevices::dev.off()
 }
 
 truth_gt <- load_gt_table(opts$truth_gt)
@@ -304,33 +290,6 @@ for (i in seq_len(nrow(variant_meta))) {
 }
 metrics_dt <- rbindlist(metrics_list)
 
-summary_dt <- data.table(
-  metric = c("r_mean", "r_median", "r2_mean", "r2_median",
-             "concordance_mean", "variants_total", "variants_with_r2"),
-  value = c(
-    mean(metrics_dt$r,  na.rm = TRUE),
-    median(metrics_dt$r,  na.rm = TRUE),
-    mean(metrics_dt$r2, na.rm = TRUE),
-    median(metrics_dt$r2, na.rm = TRUE),
-    mean(metrics_dt$concordance, na.rm = TRUE),
-    nrow(metrics_dt),
-    sum(!is.na(metrics_dt$r2))
-  )
-)
-
-maf_bins <- c(0, 0.01, 0.05, 0.1, 0.2, 0.3, 0.5)
-# Use left-closed bins ([a,b)) but ensure MAF=0.5 is included (MAF is defined as min(AF,1-AF)).
-maf_breaks <- maf_bins
-maf_breaks[length(maf_breaks)] <- maf_breaks[length(maf_breaks)] + 1e-8
-maf_labels <- c("[0,0.01)", "[0.01,0.05)", "[0.05,0.1)", "[0.1,0.2)", "[0.2,0.3)", "[0.3,0.5]")
-metrics_dt[, maf_bin := cut(maf, breaks = maf_breaks, include.lowest = TRUE, right = FALSE, labels = maf_labels)]
-maf_bins_dt <- metrics_dt[!is.na(maf_bin), .(
-  variants         = .N,
-  r_mean           = mean(r,  na.rm = TRUE),
-  r2_mean          = mean(r2, na.rm = TRUE),
-  concordance_mean = mean(concordance, na.rm = TRUE)
-), by = maf_bin]
-
 # --- Per-sample metrics ---
 # For each sample, compute overall r² across all variants, plus r² within each
 # 0.1 MAF bin. This helps identify individual samples that may be pulling the
@@ -384,214 +343,14 @@ for (j in seq_along(sample_order)) {
 sample_metrics_dt <- rbindlist(sample_metrics_list)
 setorder(sample_metrics_dt, r2_overall)  # worst samples first
 
-out_prefix <- opts$out_prefix
-fwrite(metrics_dt, sprintf("%s.metrics.tsv", out_prefix), sep = "\t")
-fwrite(summary_dt, sprintf("%s.summary.tsv", out_prefix), sep = "\t", col.names = TRUE)
-fwrite(maf_bins_dt, sprintf("%s.maf_bins.tsv", out_prefix), sep = "\t")
-fwrite(sample_metrics_dt, sprintf("%s.per_sample_metrics.tsv", out_prefix), sep = "\t")
+fwrite(sample_metrics_dt, opts$per_sample_out, sep = "\t")
 
-if (isTRUE(opts$write_parquet)) {
-  write_concordance_parquet(variant_meta, ds_mat, truth_dosage, sample_order, out_prefix)
+if (!is.null(opts$parquet_out)) {
+  write_concordance_parquet(variant_meta, ds_mat, truth_dosage, sample_order, opts$parquet_out)
 }
 
 if (isTRUE(opts$use_vcfpp)) {
-  run_vcfpp(opts$vcfpp_imputed, opts$vcfpp_truth, out_prefix)
+  run_vcfpp(opts$vcfpp_imputed, opts$vcfpp_truth, opts$eval_dir)
 }
 
-if (isTRUE(opts$plots)) {
-  if (nrow(metrics_dt) > 0) {
-    open_png(sprintf("%s.r2_hist.png", out_prefix))
-    print(ggplot(metrics_dt[!is.na(r2)], aes(x = r2)) +
-            geom_histogram(bins = 60, fill = "#1f77b4", color = "white") +
-            theme_minimal(base_size = 12) +
-            labs(title = "Imputation r2 distribution", x = expression(r^2), y = "Variants"))
-    dev.off()
-
-    open_png(sprintf("%s.concordance_hist.png", out_prefix))
-    print(ggplot(metrics_dt[!is.na(concordance)], aes(x = concordance)) +
-            geom_histogram(bins = 40, fill = "#2ca02c", color = "white") +
-            theme_minimal(base_size = 12) +
-            labs(title = "Genotype concordance", x = "Concordance", y = "Variants"))
-    dev.off()
-
-    open_png(sprintf("%s.r2_vs_maf.png", out_prefix))
-    plot_dt <- metrics_dt[!is.na(r2) & !is.na(maf)]
-    p_maf <- ggplot(plot_dt, aes(x = maf, y = r2))
-    # Use geom_hex if hexbin is available, otherwise fall back to geom_bin2d
-    if (requireNamespace("hexbin", quietly = TRUE)) {
-      p_maf <- p_maf + geom_hex(bins = 40)
-    } else {
-      p_maf <- p_maf + geom_bin2d(bins = 40)
-    }
-    p_maf <- p_maf +
-            scale_fill_viridis_c(option = "plasma") +
-            theme_minimal(base_size = 12) +
-            labs(title = "r2 vs MAF (truth-derived)", x = "Minor allele frequency", y = expression(r^2))
-    print(p_maf)
-    dev.off()
-
-    # --- Mean r2 vs MAF line plot (fine bins) ---
-    # Bin variants by MAF in 0.01 increments (0-0.01, 0.01-0.02, ..., 0.49-0.50)
-    # and plot mean r2 per bin as a line. This gives a cleaner view of how
-    # imputation quality varies with allele frequency than the heatmap above.
-    r2_maf_line_dt <- metrics_dt[!is.na(r2) & !is.na(maf)]
-    if (nrow(r2_maf_line_dt) > 0) {
-      maf_bin_width <- 0.01
-      # Fine bins (0.01 increments) with midpoints 0.005..0.495; clamp MAF=0.5 into the last bin.
-      max_bin_index <- (0.5 / maf_bin_width) - 1  # 49 for width=0.01
-      r2_maf_line_dt[, maf_fine_bin := {
-        idx <- floor(maf / maf_bin_width)
-        idx <- pmin(idx, max_bin_index)
-        idx * maf_bin_width + maf_bin_width / 2
-      }]
-
-      r2_by_maf <- r2_maf_line_dt[, .(
-        mean_r2    = mean(r2, na.rm = TRUE),
-        n_variants = .N
-      ), by = maf_fine_bin]
-      setorder(r2_by_maf, maf_fine_bin)
-
-      open_png(sprintf("%s.r2_vs_maf_line.png", out_prefix))
-      p_maf_line <- ggplot(r2_by_maf, aes(x = maf_fine_bin, y = mean_r2)) +
-        geom_line(color = "#1f77b4", linewidth = 0.7) +
-        geom_point(aes(size = n_variants), color = "#1f77b4", alpha = 0.6) +
-        scale_size_continuous(range = c(0.5, 3), name = "Variants\nper bin") +
-        scale_x_continuous(breaks = seq(0, 0.5, by = 0.05)) +
-        coord_cartesian(ylim = c(0, 1)) +
-        theme_minimal(base_size = 12) +
-        theme(panel.grid.minor = element_blank()) +
-        labs(
-          title = expression(paste("Mean ", r^2, " vs MAF (0.01 bins)")),
-          x = "Minor allele frequency",
-          y = expression(paste("Mean ", r^2))
-        )
-      print(p_maf_line)
-      dev.off()
-
-      # Save the binned data.
-      fwrite(r2_by_maf, sprintf("%s.r2_vs_maf_line.tsv", out_prefix), sep = "\t")
-    }
-
-    # --- Per-chromosome r2 in 1 Mb windows ---
-    # Bin each variant into 1 Mb windows along its chromosome and compute the
-    # mean r2 per bin.  Each chromosome is shown as a separate facet panel.
-    r2_pos_dt <- metrics_dt[!is.na(r2), .(CHROM, POS, r2)]
-    if (nrow(r2_pos_dt) > 0) {
-      bin_size <- 1e6  # 1 Mb
-      r2_pos_dt[, pos_mb := floor(POS / bin_size) * bin_size / 1e6]  # bin start in Mb
-
-      r2_bins <- r2_pos_dt[, .(
-        mean_r2   = mean(r2, na.rm = TRUE),
-        n_variants = .N
-      ), by = .(CHROM, pos_mb)]
-
-      # Sort chromosomes naturally (Chr01, Chr02, ..., Chr17, ...).
-      chr_levels <- unique(r2_bins$CHROM)
-      chr_levels <- chr_levels[order(nchar(chr_levels), chr_levels)]
-      r2_bins[, CHROM := factor(CHROM, levels = chr_levels)]
-
-      # Determine a sensible plot height: more chromosomes -> taller figure.
-      n_chr <- length(chr_levels)
-      plot_height <- max(1200, 300 * n_chr)
-
-      open_png(sprintf("%s.r2_per_chr_1Mb.png", out_prefix),
-               width = 2400, height = plot_height, res = 200)
-      p_chr <- ggplot(r2_bins, aes(x = pos_mb, y = mean_r2)) +
-        geom_line(color = "#1f77b4", linewidth = 0.5) +
-        geom_point(aes(size = n_variants), color = "#1f77b4", alpha = 0.6) +
-        scale_size_continuous(range = c(0.5, 3), name = "Variants\nper bin") +
-        facet_wrap(~ CHROM, ncol = 1, scales = "free_x", strip.position = "right") +
-        theme_minimal(base_size = 11) +
-        theme(
-          strip.text = element_text(size = 9),
-          panel.grid.minor = element_blank()
-        ) +
-        labs(
-          title = expression(paste("Mean ", r^2, " per 1 Mb window by chromosome")),
-          x = "Position (Mb)",
-          y = expression(paste("Mean ", r^2))
-        ) +
-        coord_cartesian(ylim = c(0, 1))
-      print(p_chr)
-      dev.off()
-
-      # Also save the underlying binned data as a TSV.
-      fwrite(r2_bins, sprintf("%s.r2_per_chr_1Mb.tsv", out_prefix), sep = "\t")
-    }
-
-    # --- Per-sample r2 bar plot ---
-    # Bar chart of overall r² per sample, sorted ascending so the worst samples
-    # are on the left. A horizontal dashed line shows the overall mean.
-    samp_plot_dt <- sample_metrics_dt[!is.na(r2_overall)]
-    if (nrow(samp_plot_dt) > 0) {
-      samp_plot_dt[, sample := factor(sample, levels = sample)]  # already sorted by r2_overall
-      overall_mean_r2 <- mean(samp_plot_dt$r2_overall, na.rm = TRUE)
-
-      n_samp <- nrow(samp_plot_dt)
-      bar_width  <- max(1600, 40 * n_samp)
-      bar_height <- 1200
-
-      open_png(sprintf("%s.r2_per_sample.png", out_prefix),
-               width = bar_width, height = bar_height, res = 200)
-      p_samp <- ggplot(samp_plot_dt, aes(x = sample, y = r2_overall)) +
-        geom_col(fill = "#1f77b4", width = 0.7) +
-        geom_hline(yintercept = overall_mean_r2, linetype = "dashed",
-                   color = "red", linewidth = 0.6) +
-        annotate("text", x = n_samp, y = overall_mean_r2,
-                 label = sprintf("mean = %.3f", overall_mean_r2),
-                 vjust = -0.5, hjust = 1, color = "red", size = 3.5) +
-        coord_cartesian(ylim = c(0, 1)) +
-        theme_minimal(base_size = 11) +
-        theme(
-          axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 7),
-          panel.grid.major.x = element_blank()
-        ) +
-        labs(
-          title = expression(paste("Per-sample ", r^2, " (sorted ascending)")),
-          x = "Sample",
-          y = expression(r^2)
-        )
-      print(p_samp)
-      dev.off()
-
-      # --- Per-sample r bar plot (signed, shows direction) ---
-      # Bars are coloured blue (r > 0) or red (r < 0). A negative r for a sample
-      # means that sample's imputed dosages are globally anti-correlated with truth —
-      # a strong indicator of a sample mislabel or allele-encoding error.
-      samp_r_dt <- sample_metrics_dt[!is.na(r_overall)]
-      if (nrow(samp_r_dt) > 0) {
-        samp_r_dt[, sample := factor(sample, levels = samp_plot_dt$sample)]  # same sort order as r2
-        overall_mean_r  <- mean(samp_r_dt$r_overall, na.rm = TRUE)
-
-        open_png(sprintf("%s.r_per_sample.png", out_prefix),
-                 width = bar_width, height = bar_height, res = 200)
-        p_samp_r <- ggplot(samp_r_dt, aes(x = sample, y = r_overall,
-                                           fill = r_overall >= 0)) +
-          geom_col(width = 0.7, show.legend = FALSE) +
-          scale_fill_manual(values = c("TRUE" = "#1f77b4", "FALSE" = "#d62728")) +
-          geom_hline(yintercept = 0, linewidth = 0.5, color = "black") +
-          geom_hline(yintercept = overall_mean_r, linetype = "dashed",
-                     color = "darkgreen", linewidth = 0.6) +
-          annotate("text", x = n_samp, y = overall_mean_r,
-                   label = sprintf("mean = %.3f", overall_mean_r),
-                   vjust = -0.5, hjust = 1, color = "darkgreen", size = 3.5) +
-          coord_cartesian(ylim = c(-1, 1)) +
-          theme_minimal(base_size = 11) +
-          theme(
-            axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 7),
-            panel.grid.major.x = element_blank()
-          ) +
-          labs(
-            title = "Per-sample Pearson r (signed, sorted by r²)",
-            subtitle = "Blue = positive correlation  |  Red = negative correlation (possible encoding error)",
-            x = "Sample",
-            y = "Pearson r"
-          )
-        print(p_samp_r)
-        dev.off()
-      }
-    }
-  }
-}
-
-cat(sprintf("Metrics written with prefix: %s\n", out_prefix))
+cat(sprintf("Per-sample metrics written to: %s\n", opts$per_sample_out))
