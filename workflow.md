@@ -519,7 +519,7 @@ Configuration is split across two files:
 
 ### `config/environment.sh`
 
-Paths and environment settings. Copy from `config/environment.template.sh` and fill in:
+Paths, tools, and behavior settings. Copy from `config/environment.template.sh` and fill in:
 
 ```bash
 # Conda/module setup
@@ -535,15 +535,21 @@ export QUILT2_REFERENCE_FASTA="/path/to/ref.fa"    # Optional; needed for contig
 
 ### `config/quilt2_config.sh`
 
-SLURM resource defaults (can be overridden via environment variables):
+Canonical SLURM resource defaults. Edit this file to change resource requests;
+`config/environment.sh` and exported shell variables do not override these values.
 
 | Variable | Default | Description |
 |---|---|---|
 | `QUILT2_ACCOUNT` | `a_qaafi_cas` | SLURM account |
 | `QUILT2_PARTITION` | `general` | SLURM partition |
-| `QUILT2_CPUS_PER_TASK` | `2` | CPUs per chunk task |
-| `QUILT2_MEMORY` | `8G` | Memory per chunk task |
-| `QUILT2_TIME_LIMIT` | `72:00:00` | Wall time per job |
+| `QUILT2_QOS` | empty | Optional SLURM QoS |
+| `QUILT2_NODES` | `1` | Nodes per job |
+| `QUILT2_NTASKS` | `1` | Tasks per job |
+| `QUILT2_CPUS_PER_TASK` | `2` | CPUs per Phase 1 panel-prep task |
+| `QUILT2_PHASE2_CPUS_PER_TASK` | `3` | CPUs per Phase 2 imputation chunk task |
+| `QUILT2_MEMORY` | `8G` | Memory per array task |
+| `QUILT2_TIME_LIMIT` | `72:00:00` | Wall time per Phase 1/2 array task |
+| `QUILT2_MASTER_TIME_LIMIT` | `336:00:00` | Wall time for the master polling job |
 | `QUILT2_ARRAY_MAX` | `0` (no cap) | Max concurrent array tasks |
 | `QUILT2_CONSTRAINT` | `epyc4` | Node constraint (avoids ISA issues) |
 

@@ -2,7 +2,8 @@
 # =============================================================================
 # QUILT2 PIPELINE ENVIRONMENT TEMPLATE
 # =============================================================================
-# Copy to config/environment.sh and adjust paths/resources for your cluster.
+# Copy to config/environment.sh and adjust paths, tools, and behavior toggles
+# for your cluster.
 # The orchestrator will source config/environment.sh if present; otherwise it
 # will fall back to this template.
 # =============================================================================
@@ -25,7 +26,7 @@ QUILT2_OUTPUT_DIR="${QUILT2_OUTPUT_DIR:-}"
 QUILT2_SCRATCH_DIR="${QUILT2_SCRATCH_DIR:-}"
 
 # -----------------------------------------------------------------------------
-# REFERENCES & RESOURCES
+# REFERENCES
 # -----------------------------------------------------------------------------
 
 # Reference genome (FASTA with .fai/.dict)
@@ -37,21 +38,7 @@ QUILT2_GENETIC_MAP="${QUILT2_GENETIC_MAP:-/QRISdata/Q8367/Genetic_Maps/PLEASE_SE
 # Reference panel directory. Set this here or pass --reference-panel-dir.
 QUILT2_REFERENCE_PANEL_DIR="${QUILT2_REFERENCE_PANEL_DIR:-}"
 
-# -----------------------------------------------------------------------------
-# SLURM DEFAULTS
-# -----------------------------------------------------------------------------
-
-QUILT2_ACCOUNT="${QUILT2_ACCOUNT:-a_qaafi_cas}"
-QUILT2_PARTITION="${QUILT2_PARTITION:-general}"
-QUILT2_QOS="${QUILT2_QOS:-}"
-QUILT2_NODES="${QUILT2_NODES:-1}"
-QUILT2_NTASKS="${QUILT2_NTASKS:-1}"
-QUILT2_CPUS_PER_TASK="${QUILT2_CPUS_PER_TASK:-5}"
-QUILT2_MEMORY="${QUILT2_MEMORY:-36G}"
-QUILT2_TIME_LIMIT="${QUILT2_TIME_LIMIT:-72:00:00}"
-QUILT2_MASTER_TIME_LIMIT="${QUILT2_MASTER_TIME_LIMIT:-336:00:00}"
-QUILT2_ARRAY_LIMIT="${QUILT2_ARRAY_LIMIT:-0}"   # 0 = no cap
-QUILT2_CONSTRAINT="${QUILT2_CONSTRAINT:-epyc4}" # constrain to known-good nodes
+# SLURM resource defaults live in config/quilt2_config.sh.
 
 # -----------------------------------------------------------------------------
 # TOOLS / ENVIRONMENTS

@@ -23,9 +23,9 @@ SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C 
 - `bcftools` on PATH or loadable via `BCFTOOLS_MODULE` (default `bcftools/1.18-gcc-12.3.0`).
 - Optional: conda env name via `QUILT2_CONDA_ENV` (default `quilt2`); module `miniforge/25.3.0-3` loaded if present.
 
-## Configuration (environment.sh)
-- Copy `config/environment.template.sh` to `config/environment.sh` and set site defaults (output/scratch roots, reference FASTA, genetic map path, panel dir).
-- SLURM defaults: `QUILT2_ACCOUNT`, `QUILT2_PARTITION`, `QUILT2_QOS`, `QUILT2_NODES`, `QUILT2_NTASKS`, `QUILT2_CPUS_PER_TASK`, `QUILT2_MEMORY`, `QUILT2_TIME_LIMIT`, `QUILT2_ARRAY_MAX` (0=no cap; falls back to `QUILT2_ARRAY_LIMIT`), `QUILT2_CONSTRAINT` (optional).
+## Configuration
+- Copy `config/environment.template.sh` to `config/environment.sh` and set site defaults for paths, tools, and behavior toggles (output/scratch roots, reference FASTA, genetic map path, panel dir).
+- Edit `config/quilt2_config.sh` for SLURM resource defaults: `QUILT2_ACCOUNT`, `QUILT2_PARTITION`, `QUILT2_QOS`, `QUILT2_NODES`, `QUILT2_NTASKS`, `QUILT2_CPUS_PER_TASK`, `QUILT2_PHASE2_CPUS_PER_TASK`, `QUILT2_MEMORY`, `QUILT2_TIME_LIMIT`, `QUILT2_MASTER_TIME_LIMIT`, `QUILT2_ARRAY_MAX`, `QUILT2_CONSTRAINT`.
 - Tooling: `BCFTOOLS_MODULE`, `QUILT2_CONDA_ENV`, optional `QUILT2_HOME`/`QUILT2_PREP_SCRIPT`/`QUILT2_RUN_SCRIPT`.
 - Paths and behavior toggles: `QUILT2_OUTPUT_DIR`, `QUILT2_SCRATCH_DIR`, `QUILT2_CHROMS`, `QUILT2_BUFFER`, `QUILT2_NGEN`, `QUILT2_AUTO_CHUNK_MAP`, `QUILT2_CHUNK_FILE`, `QUILT2_REGION_START/END`, `QUILT2_REMOVE_MISSING`, `QUILT2_MIN_VALID_GT_RATE`, `QUILT2_STANDARDISE_NAME`, `QUILT2_STANDARDISE_NAME_FORCE`, `QUILT2_PREP_ONLY`, `QUILT2_IMPUTE_ONLY`, `QUILT2_DRY_RUN`, `QUILT2_BAMLIST`.
 
@@ -125,16 +125,17 @@ bash bin/run_quilt2.sh \
   --eval-output /path/to/eval_dir
 ```
 
-SLURM overrides (env, matches Step1C style):
+SLURM resources (edit `config/quilt2_config.sh`):
 ```bash
-export QUILT2_ACCOUNT=youracct
-export QUILT2_PARTITION=compute
-export QUILT2_QOS=normal
-export QUILT2_CPUS_PER_TASK=8
-export QUILT2_MEMORY=48G
-export QUILT2_TIME_LIMIT=12:00:00
-export QUILT2_ARRAY_MAX=0   # 0 = no cap
-export QUILT2_CONSTRAINT=epyc4
+QUILT2_ACCOUNT="youracct"
+QUILT2_PARTITION="compute"
+QUILT2_QOS="normal"
+QUILT2_CPUS_PER_TASK="8"
+QUILT2_PHASE2_CPUS_PER_TASK="3"
+QUILT2_MEMORY="48G"
+QUILT2_TIME_LIMIT="12:00:00"
+QUILT2_ARRAY_MAX="0"   # 0 = no cap
+QUILT2_CONSTRAINT="epyc4"
 ```
 
 ## Execution model (self-submit + phases)

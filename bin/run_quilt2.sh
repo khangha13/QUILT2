@@ -64,10 +64,11 @@ Core options:
   --truth-vcf PATH             Optional truth VCF for evaluation
   --eval-output PATH           Optional evaluation output directory
 
-SLURM config (env-driven; see config/quilt2_config.sh):
+SLURM config (edit config/quilt2_config.sh):
   QUILT2_ACCOUNT, QUILT2_PARTITION, QUILT2_QOS, QUILT2_NODES, QUILT2_NTASKS,
-  QUILT2_CPUS_PER_TASK, QUILT2_MEMORY, QUILT2_TIME_LIMIT,
-  QUILT2_MASTER_TIME_LIMIT, QUILT2_ARRAY_MAX
+  QUILT2_CPUS_PER_TASK, QUILT2_PHASE2_CPUS_PER_TASK,
+  QUILT2_MEMORY, QUILT2_TIME_LIMIT, QUILT2_MASTER_TIME_LIMIT,
+  QUILT2_ARRAY_MAX, QUILT2_CONSTRAINT
 EOF
 }
 
@@ -202,7 +203,7 @@ NOMISS_FAIL_FLAG="${LOG_DIR}/quilt2_nomiss_failed.flag"
 
 if [[ "${SUBMIT_SELF}" == "true" && -z "${SLURM_JOB_ID:-}" ]]; then
     MASTER_SCRIPT="${SLURM_SCRIPT_DIR}/quilt2_master_$(date +%Y%m%d_%H%M%S).sh"
-    MASTER_TIME_LIMIT="${QUILT2_MASTER_TIME_LIMIT:-336:00:00}"
+    MASTER_TIME_LIMIT="${QUILT2_MASTER_TIME_LIMIT}"
     args_quoted="$(printf " %q" "${ORIG_ARGS[@]}")"
     {
     cat <<EOF
@@ -329,7 +330,7 @@ wait_for_slurm_job() {
 
 # SLURM config (shared by both phases)
 config="$(get_quilt2_config)"
-CFG_ACCOUNT="" CFG_PARTITION="" CFG_QOS="" CFG_CONSTRAINT="" CFG_NODES="" CFG_NTASKS="" CFG_CPUS="" CFG_MEMORY="" CFG_TIME="" CFG_ARRAY_MAX=""
+CFG_ACCOUNT="" CFG_PARTITION="" CFG_QOS="" CFG_CONSTRAINT="" CFG_NODES="" CFG_NTASKS="" CFG_CPUS="" CFG_PHASE2_CPUS="" CFG_MEMORY="" CFG_TIME="" CFG_ARRAY_MAX=""
 while IFS='=' read -r k v; do
     case "${k}" in
         ACCOUNT) CFG_ACCOUNT="${v}" ;;
@@ -339,11 +340,13 @@ while IFS='=' read -r k v; do
         NODES) CFG_NODES="${v}" ;;
         NTASKS) CFG_NTASKS="${v}" ;;
         CPUS) CFG_CPUS="${v}" ;;
+        PHASE2_CPUS) CFG_PHASE2_CPUS="${v}" ;;
         MEMORY) CFG_MEMORY="${v}" ;;
         TIME) CFG_TIME="${v}" ;;
         ARRAY_MAX) CFG_ARRAY_MAX="${v}" ;;
     esac
 done <<< "${config}"
+CFG_PHASE2_CPUS="${CFG_PHASE2_CPUS:-${CFG_CPUS}}"
 
 # Auto-detect whether panel VCFs need chromosome-name standardisation, unless the
 # user already forced --standardise-name or explicitly disabled detection with
@@ -737,7 +740,7 @@ EOF
 cat <<EOF
 #SBATCH --nodes=${CFG_NODES}
 #SBATCH --ntasks=${CFG_NTASKS}
-#SBATCH --cpus-per-task=${CFG_CPUS}
+#SBATCH --cpus-per-task=${CFG_PHASE2_CPUS}
 #SBATCH --mem=${CFG_MEMORY}
 #SBATCH --time=${CFG_TIME}
 #SBATCH --array=0-${array_max}

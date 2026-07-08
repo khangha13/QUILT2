@@ -12,6 +12,7 @@ DOSAGE_SCRIPT="${ROOT_DIR}/modules/evaluate/dosage_r2.sh"
 CONCAT_SCRIPT="${ROOT_DIR}/modules/evaluate/concat_imputed.sh"
 ENV_FILE="${ROOT_DIR}/config/environment.sh"
 ENV_TEMPLATE="${ROOT_DIR}/config/environment.template.sh"
+CONFIG_FILE="${ROOT_DIR}/config/quilt2_config.sh"
 
 usage() {
     cat <<'EOF'
@@ -34,7 +35,7 @@ Notes:
     OUTPUT_DIR/eval/dosage_eval in --chunks-dir mode (falls back to <chunks-dir>/dosage_eval
     if OUTPUT_DIR can't be resolved from a run_manifest.tsv).
   - Extra args after -- are forwarded to modules/evaluate/dosage_r2.sh (e.g., --samples FILE --region chr1:1-1e6 --no-parquet --use-vcfpp).
-  - Resources/logs honor QUILT2_* env if set (ACCOUNT, PARTITION, QOS, CPUS_PER_TASK, MEMORY, TIME_LIMIT).
+  - Resources/logs use config/quilt2_config.sh.
   - Logs are written to <out_dir>/slurm/dosage_r2_%j.(out|err).
   - Requires miniforge module and conda env myenv_py310 (override MINIFORGE_MODULE/CONDA_ENV),
     plus bcftools and Rscript (data.table/arrow, vcfppR optional).
@@ -133,6 +134,10 @@ elif [[ -f "${ENV_TEMPLATE}" ]]; then
     # shellcheck source=/dev/null
     source "${ENV_TEMPLATE}"
 fi
+if [[ -f "${CONFIG_FILE}" ]]; then
+    # shellcheck source=/dev/null
+    source "${CONFIG_FILE}"
+fi
 
 if [[ ! -f "${DOSAGE_SCRIPT}" ]]; then
     echo "[ERROR] Missing helper: ${DOSAGE_SCRIPT}" >&2
@@ -165,7 +170,7 @@ if [[ -n "${SLURM_JOB_ID:-}" ]]; then
     exec "${cmd[@]}"
 fi
 
-# Build sbatch arguments from environment defaults if present.
+# Build sbatch arguments from config/quilt2_config.sh resource defaults.
 sbatch_args=( --job-name=dosage_r2 --output="${LOG_DIR}/dosage_r2_%j.out" --error="${LOG_DIR}/dosage_r2_%j.err" )
 [[ -n "${QUILT2_ACCOUNT:-}" ]] && sbatch_args+=( --account="${QUILT2_ACCOUNT}" )
 [[ -n "${QUILT2_PARTITION:-}" ]] && sbatch_args+=( --partition="${QUILT2_PARTITION}" )
