@@ -392,15 +392,29 @@ if [[ "${RUN_PHASE1}" == "true" ]]; then
 
     # Short-circuit: skip (re)submitting the Phase 1 array entirely if every
     # chromosome's expected output already exists (e.g. on a pipeline rerun).
+    phase1_vcf_ready() {
+        local vcf="$1"
+        local idx=""
+        [[ -s "${vcf}" ]] || return 1
+        if [[ -f "${vcf}.csi" ]]; then
+            idx="${vcf}.csi"
+        elif [[ -f "${vcf}.tbi" ]]; then
+            idx="${vcf}.tbi"
+        else
+            return 1
+        fi
+        [[ "${idx}" -nt "${vcf}" ]]
+    }
+
     phase1_chr_ready() {
         local chr="$1"
         if [[ "${STANDARDISE_NAME}" == "true" ]]; then
             local std="${PANEL_STANDARDISED_DIR%/}/${chr}_chr.vcf.gz"
-            [[ -s "${std}" && ( -f "${std}.csi" || -f "${std}.tbi" ) ]] || return 1
+            phase1_vcf_ready "${std}" || return 1
         fi
         if [[ "${REMOVE_MISSING}" == "true" ]]; then
             local cleaned="${PANEL_NOMISS_DIR%/}/quilt.nomiss.${chr}.vcf.gz"
-            [[ -s "${cleaned}" && ( -f "${cleaned}.csi" || -f "${cleaned}.tbi" ) ]] || return 1
+            phase1_vcf_ready "${cleaned}" || return 1
         fi
         return 0
     }

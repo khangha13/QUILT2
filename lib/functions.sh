@@ -295,15 +295,51 @@ EOF
         return 0
     fi
 
-    if [[ ! -f "${cleaned_vcf}" ]]; then
+    local cleaned_ready="false"
+    if [[ -s "${cleaned_vcf}" ]]; then
+        local cleaned_index=""
+        if [[ -f "${cleaned_vcf}.csi" ]]; then
+            cleaned_index="${cleaned_vcf}.csi"
+        elif [[ -f "${cleaned_vcf}.tbi" ]]; then
+            cleaned_index="${cleaned_vcf}.tbi"
+        fi
+        if [[ -n "${cleaned_index}" && "${cleaned_index}" -nt "${cleaned_vcf}" ]]; then
+            cleaned_ready="true"
+        elif [[ -n "${cleaned_index}" ]]; then
+            log_warn "Existing cleaned panel has a stale index; rebuilding: ${cleaned_vcf}"
+        else
+            log_warn "Existing cleaned panel lacks an index; rebuilding: ${cleaned_vcf}"
+        fi
+    elif [[ -f "${cleaned_vcf}" ]]; then
+        log_warn "Existing cleaned panel is empty; rebuilding: ${cleaned_vcf}"
+    fi
+
+    if [[ "${cleaned_ready}" != "true" ]]; then
         local total removed kept
+        local tmp_cleaned="${cleaned_vcf}.tmp.$$.vcf.gz"
+        rm -f "${tmp_cleaned}" "${tmp_cleaned}.csi" "${tmp_cleaned}.tbi"
         total=$(bcftools view -H "${invcf}" | wc -l | awk '{print $1}')
         removed=$(bcftools view -e "${filter_expr}" -H "${invcf}" | wc -l | awk '{print $1}')
-        if ! bcftools view -i "${filter_expr}" "${invcf}" -Oz -o "${cleaned_vcf}"; then
+        if ! bcftools view -i "${filter_expr}" "${invcf}" -Oz -o "${tmp_cleaned}"; then
+            rm -f "${tmp_cleaned}" "${tmp_cleaned}.csi" "${tmp_cleaned}.tbi"
             log_error "bcftools filter (min phased rate ${min_valid_gt_rate}, no missing GT) failed for ${invcf}"
             return 1
         fi
-        run_cmd bcftools index -f -c "${cleaned_vcf}"
+        if ! bcftools index -f -c "${tmp_cleaned}"; then
+            rm -f "${tmp_cleaned}" "${tmp_cleaned}.csi" "${tmp_cleaned}.tbi"
+            log_error "Indexing failed for cleaned panel VCF ${tmp_cleaned}"
+            return 1
+        fi
+        rm -f "${cleaned_vcf}" "${cleaned_vcf}.csi" "${cleaned_vcf}.tbi"
+        mv "${tmp_cleaned}" "${cleaned_vcf}"
+        if [[ -f "${tmp_cleaned}.csi" ]]; then
+            mv "${tmp_cleaned}.csi" "${cleaned_vcf}.csi"
+        elif [[ -f "${tmp_cleaned}.tbi" ]]; then
+            mv "${tmp_cleaned}.tbi" "${cleaned_vcf}.tbi"
+        else
+            log_error "Index missing after filtering ${cleaned_vcf}"
+            return 1
+        fi
         kept=$((total - removed))
         if [[ -n "${missing_report}" ]]; then
             if [[ ! -f "${missing_report}" ]]; then
