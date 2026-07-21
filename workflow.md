@@ -1,7 +1,7 @@
 # QUILT2 Imputation Pipeline — Detailed Workflow
 
 > **Visual overview:** `workflow_diagram.html` in the repository root renders an interactive metromap diagram.
-> **Evaluation tools:** `modules/evaluate/concat_imputed.sh` (stitch chunk VCFs) → `modules/evaluate/dosage_r2.sh` → `modules/evaluate/dosage_r2.R`, plus `utils/test_concordance_check_with_array_validation.sh` for sample-identity matching against array truth.
+> **Evaluation tools:** `modules/evaluate/concat_imputed.sh` (stitch chunk VCFs) → the array evaluator (`dosage_r2.sh` + `dosage_r2.R`) or WGS evaluator (`dosage_r2_wgs.sh` + `dosage_r2_wgs.R`), plus `utils/test_concordance_check_with_array_validation.sh` for sample-identity matching against array truth.
 
 ---
 
@@ -40,7 +40,7 @@ The pipeline has five stages:
 | 2 | Chunk Definition | `bin/run_quilt2.sh` | Local / inline | Mandatory |
 | 3 | Reference Preparation | `templates/quilt2_nomiss_job.sh` | Array per chunk | Mandatory |
 | 4 | Imputation + Concat | `templates/quilt2_job.sh` | Array per chunk | Mandatory |
-| 5 | Evaluation | `bin/dosage_r2_sbatch.sh` → `modules/evaluate/dosage_r2.sh`, or `utils/test_concordance_check_with_array_validation.sh` | Single job / local utility | Optional |
+| 5 | Evaluation | `bin/dosage_r2_sbatch.sh` → array or WGS evaluator, or `utils/test_concordance_check_with_array_validation.sh` | Single job / local utility | Optional |
 
 Stages 3 and 4 run as a **single SLURM array** where each task processes one chunk of one chromosome. Stage 1 runs as a separate SLURM array over chromosomes. Stage 5 runs as a single SLURM job.
 
@@ -65,7 +65,9 @@ QUILT2_Pipeline_KH_v1/
 │   └── evaluate/
 │       ├── concat_imputed.sh    # Stitch per-chunk imputed VCFs into per-chr/genome-wide VCFs
 │       ├── dosage_r2.sh         # Evaluation pipeline (bash) — called by bin/dosage_r2_sbatch.sh
-│       └── dosage_r2.R          # R metrics, r/r², concordance, and plots
+│       ├── dosage_r2.R          # Array-mode metrics, r/r², concordance, and plots
+│       ├── dosage_r2_wgs.sh     # WGS-truth normalization, filtering, and extraction
+│       └── dosage_r2_wgs.R      # DS-versus-GT-dosage metrics and reports
 ├── templates/
 │   ├── quilt2_job.sh            # SLURM array job template (ref prep + imputation)
 │   └── quilt2_nomiss_job.sh     # Variant: filters missing panel variants first
@@ -243,19 +245,21 @@ This prints the resulting VCF path (`OUTPUT_DIR/chunks/imputed/Chr01/imputed.Chr
 
 ## 7. Stage 5 — Evaluation (Optional)
 
-**Script:** `bin/dosage_r2_sbatch.sh` → `modules/evaluate/dosage_r2.sh` → `modules/evaluate/dosage_r2.R`
+**Script:** `bin/dosage_r2_sbatch.sh` → array or WGS evaluator
 **Execution:** Single SLURM job
-**Purpose:** Compare the imputed VCF against a harmonised truth VCF to quantify imputation accuracy, and optionally perform all-vs-all sample identity matching when the array and sequencing sample names differ.
+**Purpose:** Compare the imputed VCF against array truth through the existing GT-to-GT A/B route, or against consolidated WGS truth through QUILT2 DS versus filtered GATK GT dosage.
 
-Stage 5 currently has two entry points:
+Stage 5 has these entry points:
 
-- `bin/dosage_r2_sbatch.sh` → `modules/evaluate/dosage_r2.sh` for dosage r², concordance, and per-sample metrics.
+- `bin/dosage_r2_sbatch.sh --truth-mode array` → `modules/evaluate/dosage_r2.sh` for the existing array A/B comparison.
+- `bin/dosage_r2_sbatch.sh --truth-mode wgs` → `modules/evaluate/dosage_r2_wgs.sh` for exact-allele DS-versus-GT-dosage metrics.
 - `utils/test_concordance_check_with_array_validation.sh` for Quarto-ready all-vs-all concordance matching between a nucleotide query VCF and an array truth VCF whose GT indices encode A/B genotype classes.
 
 ### How to Submit
 
 ```bash
 bash bin/dosage_r2_sbatch.sh \
+  --truth-mode array \
   --imputed  imputed.Chr01.vcf.gz \
   --truth    array_truth.vcf.gz \
   --out-prefix results/eval/Chr01
@@ -265,6 +269,7 @@ Additional flags can be passed after `--`:
 
 ```bash
 bash bin/dosage_r2_sbatch.sh \
+  --truth-mode array \
   --imputed  imputed.Chr01.vcf.gz \
   --truth    array_truth.vcf.gz \
   --out-prefix results/eval/Chr01 \
@@ -275,13 +280,26 @@ Alternatively, pass `--chunks-dir` (instead of `--imputed`) to go straight from 
 
 ```bash
 bash bin/dosage_r2_sbatch.sh \
+  --truth-mode array \
   --chunks-dir OUTPUT_DIR/chunks/imputed \
   --truth      array_truth.vcf.gz
 ```
 
 `--out-prefix` defaults to `OUTPUT_DIR/eval/dosage_eval` in this mode (`OUTPUT_DIR` resolved from `run_manifest.tsv`, two levels up from `--chunks-dir`). Add `--chr LIST` to restrict to specific chromosomes, or `--concat-force` to re-concatenate even if the concat outputs already exist.
 
-The evaluation truth VCF is expected to use array-style genotype coding where GT index `0` means allele `A` and GT index `1` means allele `B`. The truth-side decoder does not derive A/B labels from truth REF/ALT nucleotides.
+For WGS truth, point directly to the GATK pipeline's `7.Consolidated_VCF` directory:
+
+```bash
+bash bin/dosage_r2_sbatch.sh \
+  --truth-mode wgs \
+  --chunks-dir OUTPUT_DIR/chunks/imputed \
+  --truth-dataset-dir ../../7.Consolidated_VCF \
+  -- --samples truth_samples.txt
+```
+
+WGS mode uses `QUILT2_REFERENCE_FASTA` from `config/environment.sh` by default; `--reference-fasta` is an optional override. It defaults to `OUTPUT_DIR/eval/dosage_eval_wgs`, normalizes both VCF sources against the configured reference, retains biallelic SNPs, and matches exact `CHROM:POS:REF:ALT`. Site thresholds apply globally; GT/GQ/DP failures mask only the affected sample. There is no locus call-rate filter. Filter defaults and overrides live only in `config/environment.sh`, and the effective settings are written to `run_manifest.tsv` and `filter_summary.tsv`. The detailed steps below describe array mode; WGS-mode output and filtering are summarized in the README.
+
+In array mode, the truth VCF is expected to use array-style genotype coding where GT index `0` means allele `A` and GT index `1` means allele `B`. The truth-side decoder does not derive A/B labels from truth REF/ALT nucleotides.
 
 The dosage evaluation pipeline (`modules/evaluate/dosage_r2.sh`) runs six sequential steps, each with a **skip-check**: if the output files for a step already exist, the step is skipped automatically. Use `--force` to override all skip-checks.
 
@@ -531,6 +549,13 @@ export BCFTOOLS_MODULE="bcftools/1.18-gcc-12.3.0"
 export QUILT2_HOME="/path/to/QUILT"                # Directory containing QUILT2.R
 export QUILT2_GENETIC_MAP="/path/to/genetic_map"   # File or directory of per-chr maps
 export QUILT2_REFERENCE_FASTA="/path/to/ref.fa"    # Optional; needed for contig header fixes
+
+# WGS-truth evaluation (ignored by array mode)
+export QUILT2_WGS_TRUTH_FILTER_ENABLED="true"
+export QUILT2_WGS_TRUTH_MIN_GQ="60"
+export QUILT2_WGS_TRUTH_MIN_DP="10"
+# The remaining QUAL/QD/SOR/FS/MQ/rank-sum defaults are documented in
+# config/environment.template.sh and can be overridden here in the same way.
 ```
 
 ### `config/quilt2_config.sh`

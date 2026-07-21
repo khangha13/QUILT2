@@ -4,15 +4,15 @@ SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C 
 
 ## Layout
 - `bin/run_quilt2.sh` – orchestrator; builds chunk manifest, generates SLURM array script, self-submits.
-- `bin/dosage_r2_sbatch.sh` – SLURM submit wrapper for `modules/evaluate/dosage_r2.sh`.
+- `bin/dosage_r2_sbatch.sh` – SLURM submit wrapper for array or WGS truth evaluation.
 - `templates/quilt2_job.sh` – Phase 2 array worker; processes one chunk (prepare + impute).
 - `templates/quilt2_nomiss_job.sh` – Phase 1 array worker; standardises contig names and/or filters missing genotypes per chromosome.
 - `lib/functions.sh` – shared helpers (env bootstrap, bcftools/QUILT checks, panel/map resolution).
 - `config/quilt2_config.sh` – SLURM defaults (account/partition/qos/resources/array cap).
 - `config/environment.template.sh` – site-specific environment template; copy to `config/environment.sh` and customise.
 - `modules/evaluate/concat_imputed.sh` – stitches per-chunk imputed VCFs into per-chromosome/genome-wide VCFs.
-- `modules/evaluate/dosage_r2.sh` – post-imputation evaluation (concordance & dosage r/r²).
-- `modules/evaluate/dosage_r2.R` – R companion script for metrics computation and plots.
+- `modules/evaluate/dosage_r2.sh` + `dosage_r2.R` – array-truth GT-to-GT evaluation.
+- `modules/evaluate/dosage_r2_wgs.sh` + `dosage_r2_wgs.R` – WGS-truth DS-to-GT-dosage evaluation.
 - `quilt2_pipeline.legacy.sh` – pre-array monolithic script (kept only for rollback).
 - `quilt2_past_problem_and_solution.md` – troubleshooting history.
 - `dummy_map.md` – guide for creating dummy genetic maps when a species-specific map is unavailable.
@@ -27,7 +27,7 @@ SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C 
 - Copy `config/environment.template.sh` to `config/environment.sh` and set site defaults for paths, tools, and behavior toggles (output/scratch roots, reference FASTA, genetic map path, panel dir).
 - Edit `config/quilt2_config.sh` for SLURM resource defaults: `QUILT2_ACCOUNT`, `QUILT2_PARTITION`, `QUILT2_QOS`, `QUILT2_NODES`, `QUILT2_NTASKS`, `QUILT2_CPUS_PER_TASK`, `QUILT2_PHASE2_CPUS_PER_TASK`, `QUILT2_MEMORY`, `QUILT2_TIME_LIMIT`, `QUILT2_MASTER_TIME_LIMIT`, `QUILT2_ARRAY_MAX`, `QUILT2_CONSTRAINT`.
 - Tooling: `BCFTOOLS_MODULE`, `QUILT2_CONDA_ENV`, optional `QUILT2_HOME`/`QUILT2_PREP_SCRIPT`/`QUILT2_RUN_SCRIPT`.
-- Paths and behavior toggles: `QUILT2_OUTPUT_DIR`, `QUILT2_SCRATCH_DIR`, `QUILT2_CHROMS`, `QUILT2_BUFFER`, `QUILT2_NGEN`, `QUILT2_AUTO_CHUNK_MAP`, `QUILT2_CHUNK_FILE`, `QUILT2_REGION_START/END`, `QUILT2_REMOVE_MISSING`, `QUILT2_MIN_VALID_GT_RATE`, `QUILT2_STANDARDISE_NAME`, `QUILT2_STANDARDISE_NAME_FORCE`, `QUILT2_PREP_ONLY`, `QUILT2_IMPUTE_ONLY`, `QUILT2_DRY_RUN`, `QUILT2_BAMLIST`.
+- Paths and behavior toggles: `QUILT2_OUTPUT_DIR`, `QUILT2_SCRATCH_DIR`, `QUILT2_CHROMS`, `QUILT2_BUFFER`, `QUILT2_NGEN`, `QUILT2_AUTO_CHUNK_MAP`, `QUILT2_CHUNK_FILE`, `QUILT2_REGION_START/END`, `QUILT2_REMOVE_MISSING`, `QUILT2_MIN_VALID_GT_RATE`, `QUILT2_STANDARDISE_NAME`, `QUILT2_STANDARDISE_NAME_FORCE`, `QUILT2_PREP_ONLY`, `QUILT2_IMPUTE_ONLY`, `QUILT2_DRY_RUN`, `QUILT2_BAMLIST`, and the `QUILT2_WGS_TRUTH_*` filters.
 
 ## Inputs
 - `--input-dir` (`WORK_DIR`): run directory for outputs, logs, temporary files, and default input discovery. This is **not necessarily** the reference panel directory.
@@ -45,6 +45,80 @@ Reference panel requirements:
 - VCFs must be bgzip-compressed and indexed (`.tbi` or `.csi`). The script tries to index `*.vcf.gz`, but pre-indexing avoids cluster-time failures.
 - Recommended chromosome naming is `Chr01`-`Chr17`. If the panel uses bare numeric contigs (`1`-`17`), the pipeline auto-detects this (by peeking at the first contig of each chromosome's panel VCF) and automatically renames them into `ChrNN` panel VCFs in `OUTPUT_DIR/panel/standardised/`. Pass `--standardise-name` to force this on regardless of detection, or `--no-standardise-name` to disable detection and always use the panel as-is. If the panel uses another convention, pre-standardise it or make sure `--chr`, the panel VCFs, and genetic maps all use the same names.
 - If panel variants contain missing or unphased genotypes, use `--remove-missing --min-valid-gt-rate <rate>` to create cleaned per-chromosome panel VCFs before imputation.
+
+## Worked Example
+This example uses a fictional low-pass dataset named `Apple_LowPass_2026`.
+Assume the inputs are organised as follows:
+
+```text
+/QRISdata/Q8367/WGS_Reference_Panel/Apple_LowPass_2026/
+├── quilt2_run/
+│   └── bamlist.txt
+└── quilt2_output/                  # created by the pipeline
+
+/QRISdata/Q8367/Reference_Panels/apple_phased/
+├── Chr01.vcf.gz                    # plus Chr01.vcf.gz.tbi
+├── Chr02.vcf.gz                    # plus Chr02.vcf.gz.tbi
+└── ...                             # through Chr17
+
+/QRISdata/Q8367/Genetic_Maps/apple/
+├── Chr01.txt
+├── Chr02.txt
+└── ...                             # through Chr17
+```
+
+`bamlist.txt` contains one absolute BAM path per line, for example:
+
+```text
+/QRISdata/Q8367/WGS_Reference_Panel/Apple_LowPass_2026/4.BAM/Gala_01/Gala_01.bam
+/QRISdata/Q8367/WGS_Reference_Panel/Apple_LowPass_2026/4.BAM/Fuji_02/Fuji_02.bam
+```
+
+Run the following commands from the `QUILT2_Pipeline_KH_v1` directory. Replace
+the fictional paths with your own paths.
+
+```bash
+RUN_DIR=/QRISdata/Q8367/WGS_Reference_Panel/Apple_LowPass_2026/quilt2_run
+OUTPUT_DIR=/QRISdata/Q8367/WGS_Reference_Panel/Apple_LowPass_2026/quilt2_output
+PANEL_DIR=/QRISdata/Q8367/Reference_Panels/apple_phased
+MAP_DIR=/QRISdata/Q8367/Genetic_Maps/apple
+
+# 1. Validate the inputs and generate the Phase 1/2 SLURM scripts without
+#    submitting jobs. --no-submit keeps the dry-run in the current shell.
+bash bin/run_quilt2.sh \
+  --input-dir "${RUN_DIR}" \
+  --output-dir "${OUTPUT_DIR}" \
+  --bamlist "${RUN_DIR}/bamlist.txt" \
+  --reference-panel-dir "${PANEL_DIR}" \
+  --genetic-map "${MAP_DIR}" \
+  --auto-chunk-map \
+  --no-submit --dry-run
+
+# 2. Submit the full Chr01-Chr17 run using map-based automatic chunks.
+bash bin/run_quilt2.sh \
+  --input-dir "${RUN_DIR}" \
+  --output-dir "${OUTPUT_DIR}" \
+  --bamlist "${RUN_DIR}/bamlist.txt" \
+  --reference-panel-dir "${PANEL_DIR}" \
+  --genetic-map "${MAP_DIR}" \
+  --auto-chunk-map
+
+# 3. Alternatively, run a small Chr01 pilot over bases 1-5,000,000.
+bash bin/run_quilt2.sh \
+  --input-dir "${RUN_DIR}" \
+  --output-dir "${OUTPUT_DIR}/Chr01_pilot" \
+  --bamlist "${RUN_DIR}/bamlist.txt" \
+  --reference-panel-dir "${PANEL_DIR}" \
+  --genetic-map "${MAP_DIR}" \
+  --chr Chr01 \
+  --region-start 1 --region-end 5000000
+```
+
+If the phased panel contains missing or unphased genotypes, add
+`--remove-missing --min-valid-gt-rate 0.95`. If no species-specific genetic map
+is available, replace `--genetic-map "${MAP_DIR}"` with
+`--genetic-map dummy --reference-fasta /path/to/reference.fasta`; the FASTA must
+have a matching `.fai` index.
 
 ## Quick Start
 Full run with an already phased, indexed, clean panel:
@@ -183,18 +257,22 @@ See `quilt2_past_problem_and_solution.md` for fixes on genetic map columns, chr 
 
 ## Concordance & dosage r² (imputed vs truth)
 
-Post-imputation evaluation comparing imputed genotypes against a truth (array) VCF.
+Post-imputation evaluation has two explicit truth modes:
+
+- `array` (default) preserves the existing GT-to-GT A/B workflow.
+- `wgs` compares QUILT2 `FORMAT/DS` with ALT dosage derived from filtered GATK `FORMAT/GT`.
 
 ### Scripts
-- `modules/evaluate/dosage_r2.sh` (bash) + `modules/evaluate/dosage_r2.R` (R/data.table).
+- `modules/evaluate/dosage_r2.sh` (bash) + `modules/evaluate/dosage_r2.R` (R/data.table) for array mode.
+- `modules/evaluate/dosage_r2_wgs.sh` (bash) + `modules/evaluate/dosage_r2_wgs.R` (base R) for WGS mode.
 - `modules/evaluate/concat_imputed.sh` – stitches per-chunk imputed VCFs (`OUTPUT_DIR/chunks/imputed/<chr>/quilt2.diploid.<chr>.<start>-<end>.vcf.gz`) into per-chromosome and genome-wide VCFs, ordered via the run manifest (or numeric filename sort as a fallback). Adjacent chunks may overlap (e.g. `--auto-chunk-map`); each chunk is trimmed to end just before the next chunk's start before concatenating, so `bcftools index` on the result doesn't fail with "unsorted positions".
 - `bin/dosage_r2_sbatch.sh` – SLURM submit wrapper (recommended for cluster runs); accepts `--chunks-dir` as an alternative to `--imputed` to chain concatenation directly into evaluation.
 
 ### Environment
 Loads `miniforge/25.3.0-3` and bcftools modules. Activates conda env `CONDA_ENV` (default `myenv_py310`); override with `CONDA_ENV`, `MINIFORGE_MODULE`, or `BCFTOOLS_MODULE` environment variables.
 
-### How it works
-Dosages are derived from GT fields only; DS/GP tags are not used. The pipeline:
+### Array mode: how it works
+Dosages are derived from GT fields only; DS/GP tags are not used in array mode. The pipeline:
 1. Normalizes contig names to canonical ChrNN format.
 2. Finds overlapping positions (CHROM + POS) between imputed and truth VCFs via position-only intersection.
 3. Deduplicates multi-allelic positions (`bcftools norm -d snps`).
@@ -202,11 +280,11 @@ Dosages are derived from GT fields only; DS/GP tags are not used. The pipeline:
 5. Translates both VCFs to A/B format using AT/CG nucleotide grouping (A,T → group A; C,G → group B).
 6. Feeds A/B genotype TSVs to R for per-sample r² (overall and per 0.1 MAF bin).
 
-### Inputs
+### Array mode inputs
 - Imputed VCF and truth VCF (both with GT fields; both indexed).
 - Samples default to the intersection; supply `--samples` to override.
 
-### Options
+### Array mode options
 - `--region STR` – limit evaluation to a region (e.g., `Chr01:1-1e6`).
 - `--use-vcfpp` – additionally run vcfppR comparison on unambiguous VCFs.
 - `--no-parquet` – skip writing the concordance Parquet file.
@@ -243,7 +321,7 @@ Intermediates under `intermediate/`:
 
 ### Examples
 
-Direct execution:
+Array mode, direct execution:
 ```bash
 bash modules/evaluate/dosage_r2.sh \
   --imputed /path/imputed.vcf.gz \
@@ -253,9 +331,10 @@ bash modules/evaluate/dosage_r2.sh \
   --samples common_samples.txt
 ```
 
-Via SLURM (recommended):
+Array mode via SLURM (recommended; `--truth-mode array` is optional because it is the default):
 ```bash
 bash bin/dosage_r2_sbatch.sh \
+  --truth-mode array \
   --imputed /path/imputed.vcf.gz \
   --truth /path/truth.vcf.gz \
   --out-prefix results/dosage_eval \
@@ -265,7 +344,46 @@ bash bin/dosage_r2_sbatch.sh \
 Straight from raw chunk output (concatenates via `modules/evaluate/concat_imputed.sh` first, then evaluates):
 ```bash
 bash bin/dosage_r2_sbatch.sh \
+  --truth-mode array \
   --chunks-dir OUTPUT_DIR/chunks/imputed \
   --truth /path/truth.vcf.gz
 ```
 `--out-prefix` defaults to `OUTPUT_DIR/eval/dosage_eval` in this mode; add `--chr LIST` to restrict chromosomes or `--concat-force` to re-concatenate existing outputs.
+
+### WGS truth mode
+
+WGS mode discovers numerically ordered, indexed `Chr*_consolidated.vcf.gz` files in the GATK pipeline's `7.Consolidated_VCF` directory. It normalizes both sides against the same reference, keeps original biallelic SNP records, and matches exact `CHROM:POS:REF:ALT` alleles. `Chr00` is excluded unless it is explicitly requested and present on both sides.
+
+For each retained exact match, QUILT2 `DS` is compared with truth ALT dosage (`0/0 = 0`, heterozygous = 1, `1/1 = 2`). Site failures remove the site for all samples. A missing/invalid truth GT or a failing GQ/DP masks only that sample at that site; no call-rate filter is applied. Disabling WGS filtering skips the configurable site, GQ, and DP thresholds but still requires biallelic SNPs, exact allele matches, valid diploid truth GTs, and valid imputed DS values in `[0,2]`.
+
+Configure WGS filtering in `config/environment.sh` (copied from `environment.template.sh`). Defaults are `QUAL >= 30`, `QD >= 2`, `SOR <= 3`, `FS <= 60`, `MQ >= 40`, `MQRankSum >= -12.5`, `ReadPosRankSum >= -8`, `GQ >= 60`, and `DP >= 10`. Missing QUAL, QD, or MQ fails a site; missing rank-sum annotations are allowed. Set `QUILT2_WGS_TRUTH_FILTER_ENABLED=false` to skip the configurable thresholds. These settings are ignored in array mode and are not duplicated as command-line options.
+
+WGS mode from concatenated output:
+
+```bash
+bash bin/dosage_r2_sbatch.sh \
+  --truth-mode wgs \
+  --imputed OUTPUT_DIR/chunks/imputed/imputed.all_chroms.vcf.gz \
+  --truth-dataset-dir ../../7.Consolidated_VCF \
+  --out-prefix OUTPUT_DIR/eval/dosage_eval_wgs \
+  -- --samples truth_samples.txt --region Chr01:1-10000000
+```
+
+WGS mode straight from chunk output:
+
+```bash
+bash bin/dosage_r2_sbatch.sh \
+  --truth-mode wgs \
+  --chunks-dir OUTPUT_DIR/chunks/imputed \
+  --truth-dataset-dir ../../7.Consolidated_VCF
+```
+
+Both examples use `QUILT2_REFERENCE_FASTA` from `config/environment.sh`. Pass `--reference-fasta` only when a run needs to override that configured reference.
+
+The default WGS output is `OUTPUT_DIR/eval/dosage_eval_wgs`. It contains `per_variant_metrics.tsv`, `per_sample_metrics.tsv`, `filter_summary.tsv`, `genotype_masking_summary.tsv`, variant matching reports, a settings `run_manifest.tsv`, and the two matrices `intermediate/imputed_ds.tsv` and `intermediate/truth_gt_dosage.tsv`. Both metric tables retain signed Pearson `r` and `r²`; per-variant values are `NA` below three usable sample pairs or when either dosage vector has zero variance.
+
+On Bunya, run the synthetic acceptance test after loading the same modules used for evaluation:
+
+```bash
+bash tests/test_dosage_r2_wgs.sh
+```

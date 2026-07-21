@@ -1,14 +1,17 @@
 #!/bin/bash
-# Submit helper: wraps modules/evaluate/dosage_r2.sh in sbatch with logs placed beside the outputs.
+# Submit helper: routes array and WGS truth evaluation through separate evaluators.
 # Usage:
-#   bash bin/dosage_r2_sbatch.sh --imputed /path/imputed.vcf.gz --truth /path/truth.vcf.gz [--out-prefix prefix] [-- extra flags]
-# If run under SLURM (SLURM_JOB_ID set), it will execute dosage_r2.sh directly (no re-submit).
+#   bash bin/dosage_r2_sbatch.sh --truth-mode array --imputed imputed.vcf.gz --truth array.vcf.gz
+#   bash bin/dosage_r2_sbatch.sh --truth-mode wgs --imputed imputed.vcf.gz \
+#       --truth-dataset-dir ../../7.Consolidated_VCF
+# If run under SLURM (SLURM_JOB_ID set), it executes the selected evaluator directly.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DOSAGE_SCRIPT="${ROOT_DIR}/modules/evaluate/dosage_r2.sh"
+ARRAY_DOSAGE_SCRIPT="${ROOT_DIR}/modules/evaluate/dosage_r2.sh"
+WGS_DOSAGE_SCRIPT="${ROOT_DIR}/modules/evaluate/dosage_r2_wgs.sh"
 CONCAT_SCRIPT="${ROOT_DIR}/modules/evaluate/concat_imputed.sh"
 ENV_FILE="${ROOT_DIR}/config/environment.sh"
 ENV_TEMPLATE="${ROOT_DIR}/config/environment.template.sh"
@@ -17,33 +20,48 @@ CONFIG_FILE="${ROOT_DIR}/config/quilt2_config.sh"
 usage() {
     cat <<'EOF'
 Usage:
-  bash bin/dosage_r2_sbatch.sh --imputed IMPT_VCF --truth TRUTH_VCF [--out-prefix OUT_PREFIX] [-- extra args]
-  bash bin/dosage_r2_sbatch.sh --chunks-dir CHUNKS_DIR --truth TRUTH_VCF [--chr LIST] [--concat-force] [--out-prefix OUT_PREFIX] [-- extra args]
+  bash bin/dosage_r2_sbatch.sh [--truth-mode array] --imputed IMPT_VCF --truth ARRAY_VCF [--out-prefix OUT_PREFIX] [-- extra args]
+  bash bin/dosage_r2_sbatch.sh --truth-mode wgs --imputed IMPT_VCF --truth-dataset-dir DIR [--reference-fasta FASTA] [--out-prefix OUT_PREFIX] [-- extra args]
+  bash bin/dosage_r2_sbatch.sh --truth-mode array|wgs --chunks-dir CHUNKS_DIR [mode truth arguments] [--chr LIST] [--concat-force] [--out-prefix OUT_PREFIX] [-- extra args]
 
 Input (exactly one of):
   --imputed PATH        Already-concatenated imputed VCF/BCF
   --chunks-dir PATH     OUTPUT_DIR/chunks/imputed layout of per-chunk VCFs; concatenated via
                         modules/evaluate/concat_imputed.sh before evaluation
 
-Options (--chunks-dir mode only):
-  --chr LIST            Comma/space list of chromosomes to include (default: every chromosome
-                        found via the run_quilt2.sh chunk manifest, or every --chunks-dir subdir)
+Truth modes:
+  --truth-mode MODE     array or wgs (default: array)
+  array: --truth PATH   Current GT-to-GT array A/B workflow
+  wgs:   --truth-dataset-dir PATH
+                        GATK 7.Consolidated_VCF directory
+         --reference-fasta PATH
+                        Optional override for QUILT2_REFERENCE_FASTA from config/environment.sh
+
+Options:
+  --chr LIST            Comma/space list of chromosomes to include. In --chunks-dir mode this
+                        also restricts concatenation; WGS evaluation excludes Chr00 unless requested.
   --concat-force        Re-concatenate even if concat_imputed.sh outputs already exist
 
 Notes:
-  - OUT_PREFIX defaults to the imputed VCF basename (without .vcf.gz) in --imputed mode, or
-    OUTPUT_DIR/eval/dosage_eval in --chunks-dir mode (falls back to <chunks-dir>/dosage_eval
-    if OUTPUT_DIR can't be resolved from a run_manifest.tsv).
-  - Extra args after -- are forwarded to modules/evaluate/dosage_r2.sh (e.g., --samples FILE --region chr1:1-1e6 --no-parquet --use-vcfpp).
+  - Array OUT_PREFIX defaults to the imputed VCF basename in --imputed mode or
+    OUTPUT_DIR/eval/dosage_eval in --chunks-dir mode.
+  - WGS OUT_PREFIX defaults to OUTPUT_DIR/eval/dosage_eval_wgs when OUTPUT_DIR can be
+    resolved (including QUILT2_OUTPUT_DIR); otherwise it falls back beside the input.
+  - Extra args after -- are forwarded to the selected evaluator. Both modes accept --samples,
+    --region, --force, and --keep-temp. --no-parquet and --use-vcfpp are array-only.
+  - WGS filter settings come only from config/environment.sh; they are ignored in array mode.
   - Resources/logs use config/quilt2_config.sh.
   - Logs are written to <out_dir>/slurm/dosage_r2_%j.(out|err).
   - Requires miniforge module and conda env myenv_py310 (override MINIFORGE_MODULE/CONDA_ENV),
-    plus bcftools and Rscript (data.table/arrow, vcfppR optional).
+    plus bcftools and Rscript (array mode also uses data.table/arrow; vcfppR optional).
 EOF
 }
 
+TRUTH_MODE="array"
 IMPUTED=""
 TRUTH=""
+TRUTH_DATASET_DIR=""
+REFERENCE_FASTA=""
 OUT_PREFIX=""
 CHUNKS_DIR=""
 CHR_ARG=""
@@ -52,10 +70,16 @@ EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --truth-mode)
+            TRUTH_MODE="$2"; shift 2 ;;
         --imputed)
             IMPUTED="$2"; shift 2 ;;
         --truth)
             TRUTH="$2"; shift 2 ;;
+        --truth-dataset-dir)
+            TRUTH_DATASET_DIR="$2"; shift 2 ;;
+        --reference-fasta)
+            REFERENCE_FASTA="$2"; shift 2 ;;
         --out-prefix)
             OUT_PREFIX="$2"; shift 2 ;;
         --chunks-dir)
@@ -64,6 +88,8 @@ while [[ $# -gt 0 ]]; do
             CHR_ARG="$2"; shift 2 ;;
         --concat-force)
             CONCAT_FORCE=true; shift ;;
+        -h|--help)
+            usage; exit 0 ;;
         --)
             shift
             EXTRA_ARGS+=("$@")
@@ -73,6 +99,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ "${TRUTH_MODE}" != "array" && "${TRUTH_MODE}" != "wgs" ]]; then
+    echo "[ERROR] --truth-mode must be array or wgs (found '${TRUTH_MODE}')." >&2
+    exit 1
+fi
 if [[ -n "${IMPUTED}" && -n "${CHUNKS_DIR}" ]]; then
     echo "[ERROR] --imputed and --chunks-dir are mutually exclusive." >&2
     exit 1
@@ -81,11 +111,6 @@ if [[ -z "${IMPUTED}" && -z "${CHUNKS_DIR}" ]]; then
     usage
     exit 1
 fi
-if [[ -z "${TRUTH}" ]]; then
-    usage
-    exit 1
-fi
-
 if [[ -n "${IMPUTED}" && ! -f "${IMPUTED}" ]]; then
     echo "[ERROR] Imputed VCF not found: ${IMPUTED}" >&2
     exit 1
@@ -94,39 +119,33 @@ if [[ -n "${CHUNKS_DIR}" && ! -d "${CHUNKS_DIR}" ]]; then
     echo "[ERROR] Chunks directory not found: ${CHUNKS_DIR}" >&2
     exit 1
 fi
-if [[ ! -f "${TRUTH}" ]]; then
-    echo "[ERROR] Truth VCF not found: ${TRUTH}" >&2
-    exit 1
+if [[ "${TRUTH_MODE}" == "array" ]]; then
+    if [[ -z "${TRUTH}" ]]; then
+        echo "[ERROR] Array mode requires --truth." >&2
+        usage >&2
+        exit 1
+    fi
+    [[ -f "${TRUTH}" ]] || { echo "[ERROR] Truth VCF not found: ${TRUTH}" >&2; exit 1; }
+    if [[ -n "${TRUTH_DATASET_DIR}" || -n "${REFERENCE_FASTA}" ]]; then
+        echo "[ERROR] --truth-dataset-dir and --reference-fasta are WGS-mode arguments." >&2
+        exit 1
+    fi
+    DOSAGE_SCRIPT="${ARRAY_DOSAGE_SCRIPT}"
+else
+    if [[ -n "${TRUTH}" ]]; then
+        echo "[ERROR] --truth is array-only; WGS mode uses --truth-dataset-dir." >&2
+        exit 1
+    fi
+    [[ -n "${TRUTH_DATASET_DIR}" ]] || { echo "[ERROR] WGS mode requires --truth-dataset-dir." >&2; exit 1; }
+    [[ -d "${TRUTH_DATASET_DIR}" ]] || { echo "[ERROR] Truth dataset directory not found: ${TRUTH_DATASET_DIR}" >&2; exit 1; }
+    DOSAGE_SCRIPT="${WGS_DOSAGE_SCRIPT}"
 fi
 
 if [[ -n "${CHUNKS_DIR}" ]]; then
     CHUNKS_DIR="$(cd "${CHUNKS_DIR}" && pwd)"
 fi
 
-if [[ -z "${OUT_PREFIX}" ]]; then
-    if [[ -n "${CHUNKS_DIR}" ]]; then
-        OUTPUT_DIR_GUESS=""
-        if candidate_dir="$(cd "${CHUNKS_DIR}/../.." 2>/dev/null && pwd)"; then
-            [[ -f "${candidate_dir}/run_manifest.tsv" ]] && OUTPUT_DIR_GUESS="${candidate_dir}"
-        fi
-        if [[ -n "${OUTPUT_DIR_GUESS}" ]]; then
-            OUT_PREFIX="${OUTPUT_DIR_GUESS}/eval/dosage_eval"
-        else
-            OUT_PREFIX="${CHUNKS_DIR}/dosage_eval"
-        fi
-    else
-        base="$(basename "${IMPUTED}")"
-        dir="$(cd "$(dirname "${IMPUTED}")" && pwd)"
-        case "${base}" in
-            *.vcf.gz) OUT_PREFIX="${dir}/${base%.vcf.gz}" ;;
-            *.vcf) OUT_PREFIX="${dir}/${base%.vcf}" ;;
-            *.bcf) OUT_PREFIX="${dir}/${base%.bcf}" ;;
-            *) OUT_PREFIX="${dir}/${base}" ;;
-        esac
-    fi
-fi
-
-# Load environment defaults if present.
+# Load path/behavior defaults and then the resource-only SLURM configuration.
 if [[ -f "${ENV_FILE}" ]]; then
     # shellcheck source=/dev/null
     source "${ENV_FILE}"
@@ -138,6 +157,54 @@ if [[ -f "${CONFIG_FILE}" ]]; then
     # shellcheck source=/dev/null
     source "${CONFIG_FILE}"
 fi
+if [[ "${TRUTH_MODE}" == "wgs" ]]; then
+    REFERENCE_FASTA="${REFERENCE_FASTA:-${QUILT2_REFERENCE_FASTA:-}}"
+    [[ -n "${REFERENCE_FASTA}" ]] || {
+        echo "[ERROR] Set QUILT2_REFERENCE_FASTA in config/environment.sh or pass --reference-fasta." >&2
+        exit 1
+    }
+    [[ -f "${REFERENCE_FASTA}" ]] || { echo "[ERROR] Reference FASTA not found: ${REFERENCE_FASTA}" >&2; exit 1; }
+fi
+
+if [[ -z "${OUT_PREFIX}" ]]; then
+    if [[ -n "${CHUNKS_DIR}" ]]; then
+        OUTPUT_DIR_GUESS=""
+        if candidate_dir="$(cd "${CHUNKS_DIR}/../.." 2>/dev/null && pwd)"; then
+            [[ -f "${candidate_dir}/run_manifest.tsv" ]] && OUTPUT_DIR_GUESS="${candidate_dir}"
+        fi
+        if [[ -n "${OUTPUT_DIR_GUESS}" ]]; then
+            if [[ "${TRUTH_MODE}" == "wgs" ]]; then
+                OUT_PREFIX="${OUTPUT_DIR_GUESS}/eval/dosage_eval_wgs"
+            else
+                OUT_PREFIX="${OUTPUT_DIR_GUESS}/eval/dosage_eval"
+            fi
+        else
+            if [[ "${TRUTH_MODE}" == "wgs" ]]; then
+                OUT_PREFIX="${CHUNKS_DIR}/dosage_eval_wgs"
+            else
+                OUT_PREFIX="${CHUNKS_DIR}/dosage_eval"
+            fi
+        fi
+    else
+        base="$(basename "${IMPUTED}")"
+        dir="$(cd "$(dirname "${IMPUTED}")" && pwd)"
+        if [[ "${TRUTH_MODE}" == "wgs" && -n "${QUILT2_OUTPUT_DIR:-}" ]]; then
+            OUT_PREFIX="${QUILT2_OUTPUT_DIR%/}/eval/dosage_eval_wgs"
+        elif [[ "${TRUTH_MODE}" == "wgs" ]] && \
+             candidate_dir="$(cd "${dir}/../.." 2>/dev/null && pwd)" && \
+             [[ -f "${candidate_dir}/run_manifest.tsv" ]]; then
+            OUT_PREFIX="${candidate_dir}/eval/dosage_eval_wgs"
+        else
+            case "${base}" in
+                *.vcf.gz) OUT_PREFIX="${dir}/${base%.vcf.gz}" ;;
+                *.vcf) OUT_PREFIX="${dir}/${base%.vcf}" ;;
+                *.bcf) OUT_PREFIX="${dir}/${base%.bcf}" ;;
+                *) OUT_PREFIX="${dir}/${base}" ;;
+            esac
+            [[ "${TRUTH_MODE}" == "wgs" ]] && OUT_PREFIX="${OUT_PREFIX}_wgs"
+        fi
+    fi
+fi
 
 if [[ ! -f "${DOSAGE_SCRIPT}" ]]; then
     echo "[ERROR] Missing helper: ${DOSAGE_SCRIPT}" >&2
@@ -148,9 +215,28 @@ if [[ -n "${CHUNKS_DIR}" && ! -f "${CONCAT_SCRIPT}" ]]; then
     exit 1
 fi
 
+mkdir -p "$(dirname "${OUT_PREFIX}")"
 OUT_DIR="$(cd "$(dirname "${OUT_PREFIX}")" && pwd)"
 LOG_DIR="${OUT_DIR}/slurm"
 mkdir -p "${LOG_DIR}"
+if [[ "${TRUTH_MODE}" == "array" && -f "${OUT_PREFIX}/.evaluation_mode" && \
+      "$(<"${OUT_PREFIX}/.evaluation_mode")" != "array" ]]; then
+    echo "[ERROR] Output belongs to a different evaluation mode: ${OUT_PREFIX}" >&2
+    exit 1
+fi
+
+build_dosage_args() {
+    if [[ "${TRUTH_MODE}" == "array" ]]; then
+        DOSAGE_ARGS=(--truth "${TRUTH}" --out-prefix "${OUT_PREFIX}")
+    else
+        DOSAGE_ARGS=(--out-prefix "${OUT_PREFIX}" --truth-dataset-dir "${TRUTH_DATASET_DIR}" --reference-fasta "${REFERENCE_FASTA}")
+        [[ -n "${CHR_ARG}" ]] && DOSAGE_ARGS+=(--chr "${CHR_ARG}")
+    fi
+    if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
+        DOSAGE_ARGS+=("${EXTRA_ARGS[@]}")
+    fi
+}
+build_dosage_args
 
 # If already running under SLURM, just execute directly (no re-submit).
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
@@ -162,16 +248,15 @@ if [[ -n "${SLURM_JOB_ID:-}" ]]; then
         IMPUTED="$("${concat_cmd[@]}")"
         echo "[INFO] Concatenated imputed VCF: ${IMPUTED}"
     fi
-    cmd=(bash "${DOSAGE_SCRIPT}" --imputed "${IMPUTED}" --truth "${TRUTH}" --out-prefix "${OUT_PREFIX}")
-    if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
-        cmd+=("${EXTRA_ARGS[@]}")
-    fi
+    cmd=(bash "${DOSAGE_SCRIPT}" --imputed "${IMPUTED}" "${DOSAGE_ARGS[@]}")
     echo "[INFO] Running inside SLURM job ${SLURM_JOB_ID}: ${cmd[*]}"
     exec "${cmd[@]}"
 fi
 
 # Build sbatch arguments from config/quilt2_config.sh resource defaults.
-sbatch_args=( --job-name=dosage_r2 --output="${LOG_DIR}/dosage_r2_%j.out" --error="${LOG_DIR}/dosage_r2_%j.err" )
+JOB_NAME="dosage_r2"
+[[ "${TRUTH_MODE}" == "wgs" ]] && JOB_NAME="dosage_r2_wgs"
+sbatch_args=( --job-name="${JOB_NAME}" --output="${LOG_DIR}/${JOB_NAME}_%j.out" --error="${LOG_DIR}/${JOB_NAME}_%j.err" )
 [[ -n "${QUILT2_ACCOUNT:-}" ]] && sbatch_args+=( --account="${QUILT2_ACCOUNT}" )
 [[ -n "${QUILT2_PARTITION:-}" ]] && sbatch_args+=( --partition="${QUILT2_PARTITION}" )
 [[ -n "${QUILT2_QOS:-}" ]] && sbatch_args+=( --qos="${QUILT2_QOS}" )
@@ -187,13 +272,10 @@ if [[ -n "${CHUNKS_DIR}" ]]; then
     [[ "${CONCAT_FORCE}" == "true" ]] && concat_args+=(--force)
     concat_args_quoted="$(printf " %q" "${concat_args[@]}")"
 
-    dosage_args=(--truth "${TRUTH}" --out-prefix "${OUT_PREFIX}")
-    if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
-        dosage_args+=("${EXTRA_ARGS[@]}")
-    fi
+    dosage_args=("${DOSAGE_ARGS[@]}")
     dosage_args_quoted="$(printf " %q" "${dosage_args[@]}")"
 
-    CHAIN_SCRIPT="${LOG_DIR}/dosage_r2_concat_chain_$(date +%Y%m%d_%H%M%S).sh"
+    CHAIN_SCRIPT="${LOG_DIR}/${JOB_NAME}_concat_chain_$(date +%Y%m%d_%H%M%S).sh"
     cat <<EOF > "${CHAIN_SCRIPT}"
 #!/bin/bash
 set -euo pipefail
@@ -206,10 +288,7 @@ EOF
     echo "[INFO] Submitting: sbatch ${sbatch_args[*]} ${CHAIN_SCRIPT} (concat + dosage_r2 chain)"
     sbatch "${sbatch_args[@]}" "${CHAIN_SCRIPT}"
 else
-    cmd=(bash "${DOSAGE_SCRIPT}" --imputed "${IMPUTED}" --truth "${TRUTH}" --out-prefix "${OUT_PREFIX}")
-    if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
-        cmd+=("${EXTRA_ARGS[@]}")
-    fi
+    cmd=(bash "${DOSAGE_SCRIPT}" --imputed "${IMPUTED}" "${DOSAGE_ARGS[@]}")
     cmd_str="$(printf " %q" "${cmd[@]}")"
 
     echo "[INFO] Submitting: sbatch ${sbatch_args[*]} --wrap=\"${cmd_str}\""
