@@ -255,13 +255,27 @@ normalize_panel_vcf() {
     log_info "Using Step1C/QUILT2 panel VCF for ${chr}: ${invcf}"
     if [[ "${DRY_RUN:-false}" != "true" ]]; then
         if [[ "${invcf}" =~ \.vcf\.gz$ ]]; then
-            if ! bcftools index -f -c "${invcf}"; then
-                log_error "Failed to index panel VCF: ${invcf}"
+            local panel_index=""
+            if [[ -f "${invcf}.csi" ]]; then
+                panel_index="${invcf}.csi"
+            elif [[ -f "${invcf}.tbi" ]]; then
+                panel_index="${invcf}.tbi"
+            else
+                log_error "Reference panel index is missing: ${invcf}(.csi|.tbi). Rebuild it in Phase 1 before running Phase 2."
                 return 1
             fi
+            if [[ "${invcf}" -nt "${panel_index}" ]]; then
+                log_error "Reference panel index is older than its VCF: ${panel_index}. Rebuild it in Phase 1 before running Phase 2."
+                return 1
+            fi
+            if ! bcftools index -n "${invcf}" >/dev/null; then
+                log_error "Reference panel index is unreadable: ${panel_index}. Rebuild it in Phase 1 before running Phase 2."
+                return 1
+            fi
+            log_info "Using existing read-only panel index: ${panel_index}"
         fi
     else
-        echo "+ bcftools index -f -c \"${invcf}\""
+        echo "+ bcftools index -n \"${invcf}\" >/dev/null  # validate existing read-only index"
     fi
 
     if [[ "${remove_missing}" != "true" ]]; then
