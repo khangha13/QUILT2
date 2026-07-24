@@ -33,7 +33,7 @@ Truth modes:
   --truth-mode MODE     array or wgs (default: array)
   array: --truth PATH   Current GT-to-GT array A/B workflow
   wgs:   --truth-dataset-dir PATH
-                        GATK 7.Consolidated_VCF directory
+                        GATK 7.Consolidated_VCF directory; exact-allele GT-to-GT comparison
          --reference-fasta PATH
                         Optional override for QUILT2_REFERENCE_FASTA from config/environment.sh
 
@@ -51,9 +51,10 @@ Notes:
     --region, --force, and --keep-temp. --no-parquet and --use-vcfpp are array-only.
   - WGS filter settings come only from config/environment.sh; they are ignored in array mode.
   - Resources/logs use config/quilt2_config.sh.
-  - Logs are written to <out_dir>/slurm/dosage_r2_%j.(out|err).
+  - WGS mode submits a chromosome array plus an afterok finalizer. Its logs are written under
+    <out_prefix>/slurm; array mode retains its existing log location.
   - Requires miniforge module and conda env myenv_py310 (override MINIFORGE_MODULE/CONDA_ENV),
-    plus bcftools and Rscript (array mode also uses data.table/arrow; vcfppR optional).
+    plus bcftools, Rscript, data.table, and arrow (vcfppR optional in array mode).
 EOF
 }
 
@@ -218,7 +219,7 @@ fi
 mkdir -p "$(dirname "${OUT_PREFIX}")"
 OUT_DIR="$(cd "$(dirname "${OUT_PREFIX}")" && pwd)"
 LOG_DIR="${OUT_DIR}/slurm"
-mkdir -p "${LOG_DIR}"
+[[ "${TRUTH_MODE}" != "array" ]] || mkdir -p "${LOG_DIR}"
 if [[ "${TRUTH_MODE}" == "array" && -f "${OUT_PREFIX}/.evaluation_mode" && \
       "$(<"${OUT_PREFIX}/.evaluation_mode")" != "array" ]]; then
     echo "[ERROR] Output belongs to a different evaluation mode: ${OUT_PREFIX}" >&2
@@ -231,6 +232,7 @@ build_dosage_args() {
     else
         DOSAGE_ARGS=(--out-prefix "${OUT_PREFIX}" --truth-dataset-dir "${TRUTH_DATASET_DIR}" --reference-fasta "${REFERENCE_FASTA}")
         [[ -n "${CHR_ARG}" ]] && DOSAGE_ARGS+=(--chr "${CHR_ARG}")
+        [[ "${CONCAT_FORCE}" == "true" ]] && DOSAGE_ARGS+=(--concat-force)
     fi
     if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
         DOSAGE_ARGS+=("${EXTRA_ARGS[@]}")
@@ -238,8 +240,18 @@ build_dosage_args() {
 }
 build_dosage_args
 
-# If already running under SLURM, just execute directly (no re-submit).
+# If already running under SLURM, execute directly (no nested submission).
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    if [[ "${TRUTH_MODE}" == "wgs" ]]; then
+        if [[ -n "${CHUNKS_DIR}" ]]; then
+            input_args=(--chunks-dir "${CHUNKS_DIR}")
+        else
+            input_args=(--imputed "${IMPUTED}")
+        fi
+        cmd=(bash "${DOSAGE_SCRIPT}" "${input_args[@]}" "${DOSAGE_ARGS[@]}")
+        echo "[INFO] Running WGS evaluation sequentially inside SLURM job ${SLURM_JOB_ID}: ${cmd[*]}"
+        exec "${cmd[@]}"
+    fi
     if [[ -n "${CHUNKS_DIR}" ]]; then
         concat_cmd=(bash "${CONCAT_SCRIPT}" --chunks-dir "${CHUNKS_DIR}")
         [[ -n "${CHR_ARG}" ]] && concat_cmd+=(--chr "${CHR_ARG}")
@@ -253,9 +265,110 @@ if [[ -n "${SLURM_JOB_ID:-}" ]]; then
     exec "${cmd[@]}"
 fi
 
+if [[ "${TRUTH_MODE}" == "wgs" ]]; then
+    if [[ -n "${CHUNKS_DIR}" ]]; then
+        input_args=(--chunks-dir "${CHUNKS_DIR}")
+    else
+        input_args=(--imputed "${IMPUTED}")
+    fi
+
+    prepare_cmd=(bash "${DOSAGE_SCRIPT}" "${input_args[@]}" "${DOSAGE_ARGS[@]}" --prepare-only)
+    echo "[INFO] Preparing WGS chromosome tasks: ${prepare_cmd[*]}"
+    "${prepare_cmd[@]}"
+    if [[ -f "${OUT_PREFIX}/.complete" ]]; then
+        exit 0
+    fi
+
+    TASK_MANIFEST="${OUT_PREFIX}/intermediate/chromosome_tasks.tsv"
+    [[ -s "${TASK_MANIFEST}" ]] || { echo "[ERROR] WGS task manifest was not created: ${TASK_MANIFEST}" >&2; exit 1; }
+    N_TASKS="$(awk 'NR>1 {n++} END {print n+0}' "${TASK_MANIFEST}")"
+    (( N_TASKS > 0 )) || { echo "[ERROR] WGS task manifest contains no chromosome tasks." >&2; exit 1; }
+
+    WGS_MAX_CONCURRENT="${QUILT2_WGS_EVAL_MAX_CONCURRENT_CHROMS:-4}"
+    [[ "${WGS_MAX_CONCURRENT}" =~ ^[1-9][0-9]*$ ]] || {
+        echo "[ERROR] QUILT2_WGS_EVAL_MAX_CONCURRENT_CHROMS must be a positive integer." >&2
+        exit 1
+    }
+    LOG_DIR="${OUT_PREFIX}/slurm"
+    mkdir -p "${LOG_DIR}"
+
+    common_sbatch=()
+    [[ -z "${QUILT2_ACCOUNT:-}" ]] || common_sbatch+=(--account="${QUILT2_ACCOUNT}")
+    [[ -z "${QUILT2_PARTITION:-}" ]] || common_sbatch+=(--partition="${QUILT2_PARTITION}")
+    [[ -z "${QUILT2_QOS:-}" ]] || common_sbatch+=(--qos="${QUILT2_QOS}")
+    [[ -z "${QUILT2_CONSTRAINT:-}" ]] || common_sbatch+=(--constraint="${QUILT2_CONSTRAINT}")
+
+    input_args_quoted="$(printf ' %q' "${input_args[@]}")"
+    dosage_args_quoted="$(printf ' %q' "${DOSAGE_ARGS[@]}")"
+    filter_exports=""
+    while IFS=$'\t' read -r key value; do
+        case "${key}" in
+            QUILT2_WGS_*)
+                printf -v quoted_value '%q' "${value}"
+                filter_exports+="export ${key}=${quoted_value}"$'\n'
+                ;;
+        esac
+    done < "${OUT_PREFIX}/intermediate/run_manifest.pending.tsv"
+    timestamp="$(date +%Y%m%d_%H%M%S)"
+    WORKER_SCRIPT="${LOG_DIR}/dosage_r2_wgs_worker_${timestamp}.sh"
+    cat <<EOF > "${WORKER_SCRIPT}"
+#!/bin/bash
+set -euo pipefail
+${filter_exports}exec bash "${DOSAGE_SCRIPT}"${input_args_quoted}${dosage_args_quoted} \
+  --worker-task "\${SLURM_ARRAY_TASK_ID}" --task-manifest "${TASK_MANIFEST}"
+EOF
+    chmod +x "${WORKER_SCRIPT}"
+
+    worker_sbatch=(
+        --parsable
+        --job-name=dosage_r2_wgs_chr
+        --output="${LOG_DIR}/dosage_r2_wgs_chr_%A_%a.out"
+        --error="${LOG_DIR}/dosage_r2_wgs_chr_%A_%a.err"
+        "${common_sbatch[@]}"
+        --cpus-per-task="${QUILT2_WGS_EVAL_CPUS_PER_TASK:-${QUILT2_CPUS_PER_TASK:-2}}"
+        --mem="${QUILT2_WGS_EVAL_MEMORY:-${QUILT2_MEMORY:-16G}}"
+        --time="${QUILT2_WGS_EVAL_TIME_LIMIT:-${QUILT2_TIME_LIMIT:-24:00:00}}"
+        --array="1-${N_TASKS}%${WGS_MAX_CONCURRENT}"
+    )
+    echo "[INFO] Submitting WGS chromosome array: sbatch ${worker_sbatch[*]} ${WORKER_SCRIPT}"
+    array_submission="$(sbatch "${worker_sbatch[@]}" "${WORKER_SCRIPT}")"
+    ARRAY_JOB_ID="${array_submission%%;*}"
+    ARRAY_JOB_ID="${ARRAY_JOB_ID##* }"
+    [[ "${ARRAY_JOB_ID}" =~ ^[0-9]+$ ]] || { echo "[ERROR] Could not parse WGS array job ID: ${array_submission}" >&2; exit 1; }
+
+    FINALIZER_SCRIPT="${LOG_DIR}/dosage_r2_wgs_finalize_${timestamp}.sh"
+    cat <<EOF > "${FINALIZER_SCRIPT}"
+#!/bin/bash
+set -euo pipefail
+${filter_exports}exec bash "${DOSAGE_SCRIPT}"${input_args_quoted}${dosage_args_quoted} \
+  --finalize-only --task-manifest "${TASK_MANIFEST}" --array-job-id "${ARRAY_JOB_ID}"
+EOF
+    chmod +x "${FINALIZER_SCRIPT}"
+
+    finalizer_sbatch=(
+        --parsable
+        --job-name=dosage_r2_wgs_finalize
+        --output="${LOG_DIR}/dosage_r2_wgs_finalize_%j.out"
+        --error="${LOG_DIR}/dosage_r2_wgs_finalize_%j.err"
+        "${common_sbatch[@]}"
+        --cpus-per-task="${QUILT2_WGS_FINALIZE_CPUS_PER_TASK:-1}"
+        --mem="${QUILT2_WGS_FINALIZE_MEMORY:-4G}"
+        --time="${QUILT2_WGS_FINALIZE_TIME_LIMIT:-02:00:00}"
+        --dependency="afterok:${ARRAY_JOB_ID}"
+    )
+    echo "[INFO] Submitting WGS finalizer: sbatch ${finalizer_sbatch[*]} ${FINALIZER_SCRIPT}"
+    finalizer_submission="$(sbatch "${finalizer_sbatch[@]}" "${FINALIZER_SCRIPT}")"
+    FINALIZER_JOB_ID="${finalizer_submission%%;*}"
+    FINALIZER_JOB_ID="${FINALIZER_JOB_ID##* }"
+    [[ "${FINALIZER_JOB_ID}" =~ ^[0-9]+$ ]] || { echo "[ERROR] Could not parse WGS finalizer job ID: ${finalizer_submission}" >&2; exit 1; }
+
+    echo "[INFO] Submitted WGS chromosome array job ${ARRAY_JOB_ID} (${N_TASKS} task(s), max ${WGS_MAX_CONCURRENT} concurrent)."
+    echo "[INFO] Submitted WGS finalizer job ${FINALIZER_JOB_ID} afterok:${ARRAY_JOB_ID}."
+    exit 0
+fi
+
 # Build sbatch arguments from config/quilt2_config.sh resource defaults.
 JOB_NAME="dosage_r2"
-[[ "${TRUTH_MODE}" == "wgs" ]] && JOB_NAME="dosage_r2_wgs"
 sbatch_args=( --job-name="${JOB_NAME}" --output="${LOG_DIR}/${JOB_NAME}_%j.out" --error="${LOG_DIR}/${JOB_NAME}_%j.err" )
 [[ -n "${QUILT2_ACCOUNT:-}" ]] && sbatch_args+=( --account="${QUILT2_ACCOUNT}" )
 [[ -n "${QUILT2_PARTITION:-}" ]] && sbatch_args+=( --partition="${QUILT2_PARTITION}" )

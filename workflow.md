@@ -40,7 +40,7 @@ The pipeline has five stages:
 | 2 | Chunk Definition | `bin/run_quilt2.sh` | Local / inline | Mandatory |
 | 3 | Reference Preparation | `templates/quilt2_nomiss_job.sh` | Array per chunk | Mandatory |
 | 4 | Imputation + Concat | `templates/quilt2_job.sh` | Array per chunk | Mandatory |
-| 5 | Evaluation | `bin/dosage_r2_sbatch.sh` → array or WGS evaluator, or `utils/test_concordance_check_with_array_validation.sh` | Single job / local utility | Optional |
+| 5 | Evaluation | `bin/dosage_r2_sbatch.sh` → array or WGS evaluator, or `utils/test_concordance_check_with_array_validation.sh` | Single job, chromosome array + finalizer, or local utility | Optional |
 
 Stages 3 and 4 run as a **single SLURM array** where each task processes one chunk of one chromosome. Stage 1 runs as a separate SLURM array over chromosomes. Stage 5 runs as a single SLURM job.
 
@@ -67,7 +67,7 @@ QUILT2_Pipeline_KH_v1/
 │       ├── dosage_r2.sh         # Evaluation pipeline (bash) — called by bin/dosage_r2_sbatch.sh
 │       ├── dosage_r2.R          # Array-mode metrics, r/r², concordance, and plots
 │       ├── dosage_r2_wgs.sh     # WGS-truth normalization, filtering, and extraction
-│       └── dosage_r2_wgs.R      # DS-versus-GT-dosage metrics and reports
+│       └── dosage_r2_wgs.R      # Exact-allele GT-to-GT metrics and reports
 ├── templates/
 │   ├── quilt2_job.sh            # SLURM array job template (ref prep + imputation)
 │   └── quilt2_nomiss_job.sh     # Variant: filters missing panel variants first
@@ -246,13 +246,13 @@ This prints the resulting VCF path (`OUTPUT_DIR/chunks/imputed/Chr01/imputed.Chr
 ## 7. Stage 5 — Evaluation (Optional)
 
 **Script:** `bin/dosage_r2_sbatch.sh` → array or WGS evaluator
-**Execution:** Single SLURM job
-**Purpose:** Compare the imputed VCF against array truth through the existing GT-to-GT A/B route, or against consolidated WGS truth through QUILT2 DS versus filtered GATK GT dosage.
+**Execution:** Single SLURM job for array mode; chromosome array plus finalizer for WGS mode
+**Purpose:** Compare the imputed VCF against array truth through the existing GT-to-GT A/B route, or against consolidated WGS truth through exact-allele GT-to-GT ALT counts.
 
 Stage 5 has these entry points:
 
 - `bin/dosage_r2_sbatch.sh --truth-mode array` → `modules/evaluate/dosage_r2.sh` for the existing array A/B comparison.
-- `bin/dosage_r2_sbatch.sh --truth-mode wgs` → `modules/evaluate/dosage_r2_wgs.sh` for exact-allele DS-versus-GT-dosage metrics.
+- `bin/dosage_r2_sbatch.sh --truth-mode wgs` → `modules/evaluate/dosage_r2_wgs.sh` for exact-allele GT-to-GT metrics.
 - `utils/test_concordance_check_with_array_validation.sh` for Quarto-ready all-vs-all concordance matching between a nucleotide query VCF and an array truth VCF whose GT indices encode A/B genotype classes.
 
 ### How to Submit
@@ -297,7 +297,9 @@ bash bin/dosage_r2_sbatch.sh \
   -- --samples truth_samples.txt
 ```
 
-WGS mode uses `QUILT2_REFERENCE_FASTA` from `config/environment.sh` by default; `--reference-fasta` is an optional override. It defaults to `OUTPUT_DIR/eval/dosage_eval_wgs`, normalizes both VCF sources against the configured reference, retains biallelic SNPs, and matches exact `CHROM:POS:REF:ALT`. Site thresholds apply globally; GT/GQ/DP failures mask only the affected sample. There is no locus call-rate filter. Filter defaults and overrides live only in `config/environment.sh`, and the effective settings are written to `run_manifest.tsv` and `filter_summary.tsv`. The detailed steps below describe array mode; WGS-mode output and filtering are summarized in the README.
+WGS mode uses `QUILT2_REFERENCE_FASTA` from `config/environment.sh` by default; `--reference-fasta` is an optional override. It defaults to `OUTPUT_DIR/eval/dosage_eval_wgs`, normalizes both VCF sources against the configured reference, retains biallelic SNPs, and runs `bcftools isec -c none` to require exact `CHROM:POS:REF:ALT` alleles. Both `FORMAT/GT` fields are converted to hard-call ALT counts; `FORMAT/DS` is not used. Site thresholds apply globally; invalid GT or truth GQ/DP failures mask only the affected sample. There is no locus call-rate filter. Filter defaults and overrides live only in `config/environment.sh`, and the effective settings are written to root `run_manifest.tsv` and `qc/filter_summary.tsv`.
+
+The WGS wrapper submits one chromosome task per shared chromosome, capped by `QUILT2_WGS_EVAL_MAX_CONCURRENT_CHROMS` (default 4), followed by an `afterok` finalizer. With `--chunks-dir`, each task concatenates and evaluates only its chromosome. Exact common, imputed-only, and truth-only VCFs remain in task-local `$TMPDIR`; R reads GT only from the exact common pair. The finalizer combines small sufficient-statistic files rather than rereading genome-wide genotype tables. Root `per_sample_metrics.tsv` has the same overall and 0.1-MAF-bin columns as array mode. Variant metrics, per-variant concordance, and audit tables are Snappy-compressed Parquet datasets partitioned under `metrics/`. Retained matches are in `per_variant_metrics`, while rejected exact matches are in `site_filtered_variants`. No wide genotype or dosage matrix is persisted. See the README for the complete layout and Arrow extraction examples. The detailed steps below describe array mode.
 
 In array mode, the truth VCF is expected to use array-style genotype coding where GT index `0` means allele `A` and GT index `1` means allele `B`. The truth-side decoder does not derive A/B labels from truth REF/ALT nucleotides.
 
