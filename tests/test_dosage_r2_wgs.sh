@@ -390,7 +390,7 @@ array_route="$(QUILT2_WGS_TRUTH_MIN_GQ=not-a-number SLURM_JOB_ID=test bash "${WR
 [[ "${array_route}" == *"modules/evaluate/dosage_r2.sh"* ]] || fail "array mode did not route to the original evaluator"
 [[ "${array_route}" != *"MIN_GQ must"* ]] || fail "array mode evaluated WGS-only configuration"
 
-# Submission mode should create a capped chromosome array and an afterok finalizer.
+# Submission mode should use a 17-task concurrency cap and an afterok finalizer.
 MOCK_BIN="${WORK_DIR}/mock_bin"
 MOCK_SBATCH_LOG="${WORK_DIR}/mock_sbatch.log"
 MOCK_SBATCH_COUNTER="${WORK_DIR}/mock_sbatch.counter"
@@ -411,7 +411,13 @@ OUT_SUBMIT="${WORK_DIR}/output/dosage_eval_wgs_submit"
 PATH="${MOCK_BIN}:${PATH}" QUILT2_REFERENCE_FASTA="${WORK_DIR}/reference.fa" bash "${WRAPPER}" \
     --truth-mode wgs --imputed "${WORK_DIR}/imputed.vcf.gz" \
     --truth-dataset-dir "${WORK_DIR}/truth/7.Consolidated_VCF" --out-prefix "${OUT_SUBMIT}" >/dev/null
-sed -n '1p' "${MOCK_SBATCH_LOG}" | grep -Fq -- '--array=1-2%4' || fail "WGS chromosome array was not capped at four"
+sed -n '1p' "${MOCK_SBATCH_LOG}" | grep -Fq -- '--array=1-2%17' || fail "WGS chromosome array was not capped at 17"
+sed -n '1p' "${MOCK_SBATCH_LOG}" | grep -Fq -- '--mem=12G' || fail "WGS chromosome array did not request 12G per task"
 sed -n '2p' "${MOCK_SBATCH_LOG}" | grep -Fq -- '--dependency=afterok:9001' || fail "WGS finalizer dependency is incorrect"
+WORKER_SCRIPT="$(find "${OUT_SUBMIT}/slurm" -maxdepth 1 -name 'dosage_r2_wgs_worker_*.sh' -print -quit)"
+[[ -n "${WORKER_SCRIPT}" ]] || fail "WGS worker script was not created"
+bash -n "${WORKER_SCRIPT}" || fail "generated WGS worker script has invalid shell syntax"
+grep -Fq '/usr/bin/time' "${WORKER_SCRIPT}" || fail "WGS worker does not collect resource usage"
+grep -Fq '[RESOURCE]' "${WORKER_SCRIPT}" || fail "WGS worker resource summary is not labelled"
 
 echo "PASS: exact-isec WGS GT-to-GT integration tests"

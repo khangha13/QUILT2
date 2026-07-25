@@ -52,7 +52,8 @@ Notes:
   - WGS filter settings come only from config/environment.sh; they are ignored in array mode.
   - Resources/logs use config/quilt2_config.sh.
   - WGS mode submits a chromosome array plus an afterok finalizer. Its logs are written under
-    <out_prefix>/slurm; array mode retains its existing log location.
+    <out_prefix>/slurm; each chromosome .err receives a [RESOURCE] summary when GNU time is
+    available. Array mode retains its existing log location.
   - Requires miniforge module and conda env myenv_py310 (override MINIFORGE_MODULE/CONDA_ENV),
     plus bcftools, Rscript, data.table, and arrow (vcfppR optional in array mode).
 EOF
@@ -284,7 +285,7 @@ if [[ "${TRUTH_MODE}" == "wgs" ]]; then
     N_TASKS="$(awk 'NR>1 {n++} END {print n+0}' "${TASK_MANIFEST}")"
     (( N_TASKS > 0 )) || { echo "[ERROR] WGS task manifest contains no chromosome tasks." >&2; exit 1; }
 
-    WGS_MAX_CONCURRENT="${QUILT2_WGS_EVAL_MAX_CONCURRENT_CHROMS:-4}"
+    WGS_MAX_CONCURRENT="${QUILT2_WGS_EVAL_MAX_CONCURRENT_CHROMS:-17}"
     [[ "${WGS_MAX_CONCURRENT}" =~ ^[1-9][0-9]*$ ]] || {
         echo "[ERROR] QUILT2_WGS_EVAL_MAX_CONCURRENT_CHROMS must be a positive integer." >&2
         exit 1
@@ -314,8 +315,15 @@ if [[ "${TRUTH_MODE}" == "wgs" ]]; then
     cat <<EOF > "${WORKER_SCRIPT}"
 #!/bin/bash
 set -euo pipefail
-${filter_exports}exec bash "${DOSAGE_SCRIPT}"${input_args_quoted}${dosage_args_quoted} \
-  --worker-task "\${SLURM_ARRAY_TASK_ID}" --task-manifest "${TASK_MANIFEST}"
+${filter_exports}worker_command=(bash "${DOSAGE_SCRIPT}"${input_args_quoted}${dosage_args_quoted} \
+  --worker-task "\${SLURM_ARRAY_TASK_ID}" --task-manifest "${TASK_MANIFEST}")
+if [[ -x /usr/bin/time ]]; then
+  exec /usr/bin/time \
+    -f "[RESOURCE] job_id=\${SLURM_JOB_ID:-NA} array_job_id=\${SLURM_ARRAY_JOB_ID:-NA} task_id=\${SLURM_ARRAY_TASK_ID:-NA} elapsed_s=%e user_cpu_s=%U system_cpu_s=%S cpu=%P max_rss_kb=%M fs_input_ops=%I fs_output_ops=%O exit_status=%x" \
+    "\${worker_command[@]}"
+fi
+echo "[WARN] /usr/bin/time is unavailable; no worker resource summary will be written." >&2
+exec "\${worker_command[@]}"
 EOF
     chmod +x "${WORKER_SCRIPT}"
 
@@ -326,7 +334,7 @@ EOF
         --error="${LOG_DIR}/dosage_r2_wgs_chr_%A_%a.err"
         "${common_sbatch[@]}"
         --cpus-per-task="${QUILT2_WGS_EVAL_CPUS_PER_TASK:-${QUILT2_CPUS_PER_TASK:-2}}"
-        --mem="${QUILT2_WGS_EVAL_MEMORY:-${QUILT2_MEMORY:-16G}}"
+        --mem="${QUILT2_WGS_EVAL_MEMORY:-12G}"
         --time="${QUILT2_WGS_EVAL_TIME_LIMIT:-${QUILT2_TIME_LIMIT:-24:00:00}}"
         --array="1-${N_TASKS}%${WGS_MAX_CONCURRENT}"
     )
