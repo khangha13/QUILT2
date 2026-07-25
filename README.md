@@ -25,7 +25,7 @@ SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C 
 
 ## Configuration
 - Copy `config/environment.template.sh` to `config/environment.sh` and set site defaults for paths, tools, and behavior toggles (output/scratch roots, reference FASTA, genetic map path, panel dir).
-- Edit `config/quilt2_config.sh` for SLURM resource defaults: `QUILT2_ACCOUNT`, `QUILT2_PARTITION`, `QUILT2_QOS`, `QUILT2_NODES`, `QUILT2_NTASKS`, `QUILT2_CPUS_PER_TASK`, `QUILT2_PHASE2_CPUS_PER_TASK`, `QUILT2_MEMORY`, `QUILT2_TIME_LIMIT`, `QUILT2_MASTER_TIME_LIMIT`, `QUILT2_WGS_EVAL_CPUS_PER_TASK`, `QUILT2_WGS_EVAL_MEMORY`, `QUILT2_WGS_EVAL_TIME_LIMIT`, `QUILT2_WGS_EVAL_MAX_CONCURRENT_CHROMS`, `QUILT2_WGS_FINALIZE_CPUS_PER_TASK`, `QUILT2_WGS_FINALIZE_MEMORY`, `QUILT2_WGS_FINALIZE_TIME_LIMIT`, `QUILT2_ARRAY_MAX`, `QUILT2_CONSTRAINT`.
+- Edit `config/quilt2_config.sh` for SLURM resource defaults: `QUILT2_ACCOUNT`, `QUILT2_PARTITION`, `QUILT2_QOS`, `QUILT2_NODES`, `QUILT2_NTASKS`, `QUILT2_CPUS_PER_TASK`, `QUILT2_PHASE2_CPUS_PER_TASK`, `QUILT2_MEMORY`, `QUILT2_TIME_LIMIT`, `QUILT2_MASTER_TIME_LIMIT`, `QUILT2_WGS_EVAL_CPUS_PER_TASK`, `QUILT2_WGS_EVAL_MEMORY`, `QUILT2_WGS_EVAL_TIME_LIMIT`, `QUILT2_WGS_FINALIZE_CPUS_PER_TASK`, `QUILT2_WGS_FINALIZE_MEMORY`, `QUILT2_WGS_FINALIZE_TIME_LIMIT`, `QUILT2_ARRAY_MAX`, `QUILT2_CONSTRAINT`.
 - Tooling: `BCFTOOLS_MODULE`, `QUILT2_CONDA_ENV`, optional `QUILT2_HOME`/`QUILT2_PREP_SCRIPT`/`QUILT2_RUN_SCRIPT`.
 - Paths and behavior toggles: `QUILT2_OUTPUT_DIR`, `QUILT2_SCRATCH_DIR`, `QUILT2_CHROMS`, `QUILT2_BUFFER`, `QUILT2_NGEN`, `QUILT2_AUTO_CHUNK_MAP`, `QUILT2_CHUNK_FILE`, `QUILT2_REGION_START/END`, `QUILT2_REMOVE_MISSING`, `QUILT2_MIN_VALID_GT_RATE`, `QUILT2_STANDARDISE_NAME`, `QUILT2_STANDARDISE_NAME_FORCE`, `QUILT2_PREP_ONLY`, `QUILT2_IMPUTE_ONLY`, `QUILT2_DRY_RUN`, `QUILT2_BAMLIST`, and the `QUILT2_WGS_TRUTH_*` filters.
 
@@ -384,7 +384,7 @@ bash bin/dosage_r2_sbatch.sh \
 
 Both examples use `QUILT2_REFERENCE_FASTA` from `config/environment.sh`. Pass `--reference-fasta` only when a run needs to override that configured reference.
 
-The submit wrapper creates one Slurm array task per chromosome (up to 17 concurrent tasks by default, each requesting 2 CPUs and 12 GB) and an `afterok` finalizer. In `--chunks-dir` mode, each worker concatenates only its assigned chromosome; it does not create `imputed.all_chroms.vcf.gz`. Worker and finalizer resources, including the concurrency cap, are configured in `config/quilt2_config.sh`. When GNU `time` is available and its wrapper is not itself terminated by Slurm, each chromosome `.err` log receives one `[RESOURCE]` line reporting elapsed and CPU time, peak RSS, filesystem operations, and exit status for the complete worker.
+The submit wrapper creates one Slurm array task per chromosome, with concurrency managed by Slurm, and an `afterok` finalizer. Each chromosome task requests 2 CPUs and 12 GB by default. In `--chunks-dir` mode, each worker concatenates only its assigned chromosome; it does not create `imputed.all_chroms.vcf.gz`. Worker and finalizer resources are configured in `config/quilt2_config.sh`. When GNU `time` is available and its wrapper is not itself terminated by Slurm, each chromosome `.err` log receives one `[RESOURCE]` line reporting elapsed and CPU time, peak RSS, filesystem operations, and exit status for the complete worker.
 
 The default WGS output is `OUTPUT_DIR/eval/dosage_eval_wgs`:
 

@@ -285,11 +285,6 @@ if [[ "${TRUTH_MODE}" == "wgs" ]]; then
     N_TASKS="$(awk 'NR>1 {n++} END {print n+0}' "${TASK_MANIFEST}")"
     (( N_TASKS > 0 )) || { echo "[ERROR] WGS task manifest contains no chromosome tasks." >&2; exit 1; }
 
-    WGS_MAX_CONCURRENT="${QUILT2_WGS_EVAL_MAX_CONCURRENT_CHROMS:-17}"
-    [[ "${WGS_MAX_CONCURRENT}" =~ ^[1-9][0-9]*$ ]] || {
-        echo "[ERROR] QUILT2_WGS_EVAL_MAX_CONCURRENT_CHROMS must be a positive integer." >&2
-        exit 1
-    }
     LOG_DIR="${OUT_PREFIX}/slurm"
     mkdir -p "${LOG_DIR}"
 
@@ -336,7 +331,7 @@ EOF
         --cpus-per-task="${QUILT2_WGS_EVAL_CPUS_PER_TASK:-${QUILT2_CPUS_PER_TASK:-2}}"
         --mem="${QUILT2_WGS_EVAL_MEMORY:-12G}"
         --time="${QUILT2_WGS_EVAL_TIME_LIMIT:-${QUILT2_TIME_LIMIT:-24:00:00}}"
-        --array="1-${N_TASKS}%${WGS_MAX_CONCURRENT}"
+        --array="1-${N_TASKS}"
     )
     echo "[INFO] Submitting WGS chromosome array: sbatch ${worker_sbatch[*]} ${WORKER_SCRIPT}"
     array_submission="$(sbatch "${worker_sbatch[@]}" "${WORKER_SCRIPT}")"
@@ -370,7 +365,7 @@ EOF
     FINALIZER_JOB_ID="${FINALIZER_JOB_ID##* }"
     [[ "${FINALIZER_JOB_ID}" =~ ^[0-9]+$ ]] || { echo "[ERROR] Could not parse WGS finalizer job ID: ${finalizer_submission}" >&2; exit 1; }
 
-    echo "[INFO] Submitted WGS chromosome array job ${ARRAY_JOB_ID} (${N_TASKS} task(s), max ${WGS_MAX_CONCURRENT} concurrent)."
+    echo "[INFO] Submitted WGS chromosome array job ${ARRAY_JOB_ID} (${N_TASKS} task(s); concurrency managed by Slurm)."
     echo "[INFO] Submitted WGS finalizer job ${FINALIZER_JOB_ID} afterok:${ARRAY_JOB_ID}."
     exit 0
 fi
