@@ -90,9 +90,7 @@ read_raw <- function(path) {
 run_chromosome <- function(opt) {
   require_options(opt, c(
     "imputed-common-raw", "truth-common-raw", "imputed-only-raw", "truth-only-raw",
-    "samples", "out-dir", "chromosome", "filter-enabled",
-    "min-qual", "min-qd", "max-sor", "max-fs", "min-mq",
-    "min-mq-rank-sum", "min-read-pos-rank-sum", "min-gq", "min-dp"
+    "samples", "out-dir", "chromosome", "filter-enabled", "min-gq", "min-dp"
   ))
 
   threads <- suppressWarnings(as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "1")))
@@ -102,12 +100,8 @@ run_chromosome <- function(opt) {
   chromosome <- opt[["chromosome"]]
   filter_enabled <- identical(opt[["filter-enabled"]], "true")
   thresholds <- list(
-    min_qual = as.numeric(opt[["min-qual"]]), min_qd = as.numeric(opt[["min-qd"]]),
-    max_sor = as.numeric(opt[["max-sor"]]), max_fs = as.numeric(opt[["max-fs"]]),
-    min_mq = as.numeric(opt[["min-mq"]]),
-    min_mq_rank_sum = as.numeric(opt[["min-mq-rank-sum"]]),
-    min_read_pos_rank_sum = as.numeric(opt[["min-read-pos-rank-sum"]]),
-    min_gq = as.numeric(opt[["min-gq"]]), min_dp = as.numeric(opt[["min-dp"]])
+    min_gq = as.numeric(opt[["min-gq"]]),
+    min_dp = as.numeric(opt[["min-dp"]])
   )
 
   samples <- readLines(opt[["samples"]], warn = FALSE)
@@ -122,10 +116,9 @@ run_chromosome <- function(opt) {
   truth_only <- read_raw(opt[["truth-only-raw"]])
   variant_cols <- c("CHROM", "POS", "REF", "ALT", "ID")
   key_cols <- c("CHROM", "POS", "REF", "ALT")
-  truth_site_cols <- c("QUAL", "QD", "SOR", "FS", "MQ", "MQRankSum", "ReadPosRankSum")
 
   missing_imputed <- setdiff(c(variant_cols, samples), names(imputed))
-  required_truth <- c(variant_cols, truth_site_cols, paste0(samples, ".GT"))
+  required_truth <- c(variant_cols, paste0(samples, ".GT"))
   if (filter_enabled) required_truth <- c(required_truth, paste0(samples, ".GQ"), paste0(samples, ".DP"))
   missing_truth <- setdiff(required_truth, names(truth))
   missing_imputed_only <- setdiff(variant_cols, names(imputed_only))
@@ -148,49 +141,6 @@ run_chromosome <- function(opt) {
   setorderv(imputed_only, key_cols)
   setorderv(truth_only, key_cols)
 
-  qual <- as_num(truth$QUAL)
-  qd <- as_num(truth$QD)
-  sor <- as_num(truth$SOR)
-  fs <- as_num(truth$FS)
-  mq <- as_num(truth$MQ)
-  mq_rank <- as_num(truth$MQRankSum)
-  read_pos_rank <- as_num(truth$ReadPosRankSum)
-  site_fail <- list(
-    missing_QUAL = is.na(qual),
-    QUAL_below_min = !is.na(qual) & qual < thresholds$min_qual,
-    missing_QD = is.na(qd),
-    QD_below_min = !is.na(qd) & qd < thresholds$min_qd,
-    SOR_above_max = !is.na(sor) & sor > thresholds$max_sor,
-    FS_above_max = !is.na(fs) & fs > thresholds$max_fs,
-    missing_MQ = is.na(mq),
-    MQ_below_min = !is.na(mq) & mq < thresholds$min_mq,
-    MQRankSum_below_min = !is.na(mq_rank) & mq_rank < thresholds$min_mq_rank_sum,
-    ReadPosRankSum_below_min = !is.na(read_pos_rank) & read_pos_rank < thresholds$min_read_pos_rank_sum
-  )
-  if (filter_enabled) {
-    site_pass <- !Reduce(`|`, site_fail)
-  } else {
-    site_pass <- rep(TRUE, nrow(truth))
-    site_fail <- lapply(site_fail, function(x) rep(FALSE, length(x)))
-  }
-  site_reasons <- rep("PASS", nrow(truth))
-  for (reason in names(site_fail)) {
-    failed <- which(site_fail[[reason]])
-    if (length(failed)) {
-      site_reasons[failed] <- ifelse(
-        site_reasons[failed] == "PASS", reason, paste0(site_reasons[failed], ";", reason)
-      )
-    }
-  }
-
-  matched_variants <- imputed[, .(CHROM, POS, REF, ALT, ID)]
-  matched_variants[, `:=`(
-    ID_truth = truth$ID,
-    site_filter_pass = site_pass,
-    site_filter_reasons = site_reasons
-  )]
-  site_filtered_variants <- matched_variants[site_filter_pass == FALSE]
-
   imeta <- rbindlist(list(
     imputed[, .(CHROM, POS, REF, ALT, ID_imputed = ID)],
     imputed_only[, .(CHROM, POS, REF, ALT, ID_imputed = ID)]
@@ -206,9 +156,9 @@ run_chromosome <- function(opt) {
   allele_mismatches <- allele_pairs[REF_imputed != REF_truth | ALT_imputed != ALT_truth]
   setorder(allele_mismatches, CHROM, POS, REF_imputed, ALT_imputed, REF_truth, ALT_truth)
 
-  retained <- which(site_pass)
-  meta <- imputed[retained, ..variant_cols]
-  meta[, ID_truth := truth$ID[retained]]
+  retained <- seq_len(nrow(imputed))
+  meta <- imputed[, ..variant_cols]
+  meta[, ID_truth := truth$ID]
 
   truth_gt_count <- matrix(NA_real_, nrow = length(retained), ncol = length(samples), dimnames = list(NULL, samples))
   imputed_gt_count <- matrix(NA_real_, nrow = length(retained), ncol = length(samples), dimnames = list(NULL, samples))
@@ -318,32 +268,23 @@ run_chromosome <- function(opt) {
   variant_counts <- data.table(
     section = "variants", chromosome = chromosome,
     reason = c(
-      "imputed_structural", "truth_structural", "exact_matches", "retained_exact_matches",
-      "imputed_only", "truth_only", "allele_mismatch_pairs"
+      "imputed_structural", "truth_structural", "exact_matches", "imputed_only",
+      "truth_only", "allele_mismatch_pairs"
     ),
     count = c(
       nrow(imputed) + nrow(imputed_only), nrow(truth) + nrow(truth_only),
-      nrow(imputed), length(retained), nrow(imputed_only), nrow(truth_only),
-      nrow(allele_mismatches)
+      nrow(imputed), nrow(imputed_only), nrow(truth_only), nrow(allele_mismatches)
     ),
     value = NA_character_
   )
-  site_counts <- data.table(
-    section = "site_filter", chromosome = chromosome,
-    reason = c("sites_total", "sites_passed", "sites_failed", names(site_fail)),
-    count = c(nrow(truth), sum(site_pass), sum(!site_pass), vapply(site_fail, sum, numeric(1))),
-    value = NA_character_
-  )
-  filter_summary <- rbindlist(list(variant_counts, site_counts), use.names = TRUE)
 
   out_dir <- opt[["out-dir"]]
   atomic_parquet(variant_metrics, file.path(out_dir, "metrics", "per_variant_metrics"), chromosome)
-  atomic_parquet(site_filtered_variants, file.path(out_dir, "metrics", "site_filtered_variants"), chromosome)
   atomic_parquet(imputed_only[, ..variant_cols], file.path(out_dir, "metrics", "imputed_only_variants"), chromosome)
   atomic_parquet(truth_only[, ..variant_cols], file.path(out_dir, "metrics", "truth_only_variants"), chromosome)
   atomic_parquet(allele_mismatches, file.path(out_dir, "metrics", "allele_mismatches"), chromosome)
   atomic_fwrite(sample_stats, file.path(out_dir, "intermediate", "chromosome_stats", paste0(chromosome, ".sample_stats.tsv")))
-  atomic_fwrite(filter_summary, file.path(out_dir, "qc", "chromosomes", paste0(chromosome, ".filter_summary.tsv")))
+  atomic_fwrite(variant_counts, file.path(out_dir, "qc", "chromosomes", paste0(chromosome, ".filter_summary.tsv")))
   atomic_fwrite(masking_summary, file.path(out_dir, "qc", "chromosomes", paste0(chromosome, ".genotype_masking_summary.tsv")))
 
   cat(sprintf("[INFO] WGS GT chromosome metrics complete: %s, %d retained variants, %d samples\n", chromosome, nrow(meta), length(samples)))
@@ -351,9 +292,7 @@ run_chromosome <- function(opt) {
 
 run_finalize <- function(opt) {
   require_options(opt, c(
-    "out-dir", "chromosome-manifest", "filter-enabled", "min-qual", "min-qd",
-    "max-sor", "max-fs", "min-mq", "min-mq-rank-sum",
-    "min-read-pos-rank-sum", "min-gq", "min-dp"
+    "out-dir", "chromosome-manifest", "filter-enabled", "min-gq", "min-dp"
   ))
   out_dir <- opt[["out-dir"]]
   tasks <- fread(opt[["chromosome-manifest"]], sep = "\t", header = TRUE)
@@ -397,10 +336,7 @@ run_finalize <- function(opt) {
   setcolorder(filter_all, names(filter_base))
   config_values <- c(
     filter_enabled = opt[["filter-enabled"]],
-    min_qual = opt[["min-qual"]],
-    min_qd = opt[["min-qd"]], max_sor = opt[["max-sor"]], max_fs = opt[["max-fs"]],
-    min_mq = opt[["min-mq"]], min_mq_rank_sum = opt[["min-mq-rank-sum"]],
-    min_read_pos_rank_sum = opt[["min-read-pos-rank-sum"]], min_gq = opt[["min-gq"]],
+    min_gq = opt[["min-gq"]],
     min_dp = opt[["min-dp"]]
   )
   config_rows <- data.table(

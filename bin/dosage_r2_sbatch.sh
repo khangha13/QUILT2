@@ -51,7 +51,7 @@ Notes:
     --region, --force, and --keep-temp. --no-parquet and --use-vcfpp are array-only.
   - WGS filter settings come only from config/environment.sh; they are ignored in array mode.
   - Resources/logs use config/quilt2_config.sh.
-  - WGS mode submits a chromosome array plus an afterok finalizer. Its logs are written under
+  - WGS mode submits a chromosome array plus an afterany checkpoint-validating finalizer. Its logs are written under
     <out_prefix>/slurm; each chromosome .err receives a [RESOURCE] summary when GNU time is
     available. Array mode retains its existing log location.
   - Requires miniforge module and conda env myenv_py310 (override MINIFORGE_MODULE/CONDA_ENV),
@@ -357,7 +357,7 @@ EOF
         --cpus-per-task="${QUILT2_WGS_FINALIZE_CPUS_PER_TASK:-1}"
         --mem="${QUILT2_WGS_FINALIZE_MEMORY:-4G}"
         --time="${QUILT2_WGS_FINALIZE_TIME_LIMIT:-02:00:00}"
-        --dependency="afterok:${ARRAY_JOB_ID}"
+        --dependency="afterany:${ARRAY_JOB_ID}"
     )
     echo "[INFO] Submitting WGS finalizer: sbatch ${finalizer_sbatch[*]} ${FINALIZER_SCRIPT}"
     finalizer_submission="$(sbatch "${finalizer_sbatch[@]}" "${FINALIZER_SCRIPT}")"
@@ -366,7 +366,7 @@ EOF
     [[ "${FINALIZER_JOB_ID}" =~ ^[0-9]+$ ]] || { echo "[ERROR] Could not parse WGS finalizer job ID: ${finalizer_submission}" >&2; exit 1; }
 
     echo "[INFO] Submitted WGS chromosome array job ${ARRAY_JOB_ID} (${N_TASKS} task(s); concurrency managed by Slurm)."
-    echo "[INFO] Submitted WGS finalizer job ${FINALIZER_JOB_ID} afterok:${ARRAY_JOB_ID}."
+    echo "[INFO] Submitted WGS finalizer job ${FINALIZER_JOB_ID} afterany:${ARRAY_JOB_ID}."
     exit 0
 fi
 

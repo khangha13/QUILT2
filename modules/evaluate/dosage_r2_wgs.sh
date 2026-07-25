@@ -9,7 +9,7 @@ ENV_FILE="${ROOT_DIR}/config/environment.sh"
 ENV_TEMPLATE="${ROOT_DIR}/config/environment.template.sh"
 R_HELPER="${SCRIPT_DIR}/dosage_r2_wgs.R"
 CONCAT_SCRIPT="${SCRIPT_DIR}/concat_imputed.sh"
-OUTPUT_SCHEMA_VERSION="wgs-gt-isec-v4"
+OUTPUT_SCHEMA_VERSION="wgs-gt-isec-v5"
 
 usage() {
     cat <<'EOF'
@@ -96,33 +96,25 @@ if [[ -n "${QUILT2_WGS_KEEP_DOSAGE_MATRICES+x}" ]]; then
     echo "[WARN] QUILT2_WGS_KEEP_DOSAGE_MATRICES is obsolete and will be ignored; WGS GT evaluation does not write dosage matrices." >&2
     unset QUILT2_WGS_KEEP_DOSAGE_MATRICES
 fi
-QUILT2_WGS_TRUTH_MIN_QUAL="${QUILT2_WGS_TRUTH_MIN_QUAL:-30}"
-QUILT2_WGS_TRUTH_MIN_QD="${QUILT2_WGS_TRUTH_MIN_QD:-2.0}"
-QUILT2_WGS_TRUTH_MAX_SOR="${QUILT2_WGS_TRUTH_MAX_SOR:-3.0}"
-QUILT2_WGS_TRUTH_MAX_FS="${QUILT2_WGS_TRUTH_MAX_FS:-60.0}"
-QUILT2_WGS_TRUTH_MIN_MQ="${QUILT2_WGS_TRUTH_MIN_MQ:-40.0}"
-QUILT2_WGS_TRUTH_MIN_MQ_RANK_SUM="${QUILT2_WGS_TRUTH_MIN_MQ_RANK_SUM:--12.5}"
-QUILT2_WGS_TRUTH_MIN_READ_POS_RANK_SUM="${QUILT2_WGS_TRUTH_MIN_READ_POS_RANK_SUM:--8.0}"
 QUILT2_WGS_TRUTH_MIN_GQ="${QUILT2_WGS_TRUTH_MIN_GQ:-60}"
 QUILT2_WGS_TRUTH_MIN_DP="${QUILT2_WGS_TRUTH_MIN_DP:-10}"
 
-is_numeric() {
-    [[ "$1" =~ ^[-+]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][-+]?[0-9]+)?$ ]]
-}
+obsolete_site_filters=()
+for name in \
+    QUILT2_WGS_TRUTH_MIN_QUAL QUILT2_WGS_TRUTH_MIN_QD QUILT2_WGS_TRUTH_MAX_SOR \
+    QUILT2_WGS_TRUTH_MAX_FS QUILT2_WGS_TRUTH_MIN_MQ QUILT2_WGS_TRUTH_MIN_MQ_RANK_SUM \
+    QUILT2_WGS_TRUTH_MIN_READ_POS_RANK_SUM; do
+    [[ -z "${!name+x}" ]] || obsolete_site_filters+=("${name}")
+done
+if (( ${#obsolete_site_filters[@]} > 0 )); then
+    echo "[WARN] Ignoring obsolete WGS site-filter settings: ${obsolete_site_filters[*]}; only GQ and DP are used." >&2
+fi
 
 validate_config() {
     if [[ "${QUILT2_WGS_TRUTH_FILTER_ENABLED}" != "true" && "${QUILT2_WGS_TRUTH_FILTER_ENABLED}" != "false" ]]; then
         echo "[ERROR] QUILT2_WGS_TRUTH_FILTER_ENABLED must be true or false." >&2
         return 1
     fi
-    local name value
-    for name in \
-        QUILT2_WGS_TRUTH_MIN_QUAL QUILT2_WGS_TRUTH_MIN_QD QUILT2_WGS_TRUTH_MAX_SOR \
-        QUILT2_WGS_TRUTH_MAX_FS QUILT2_WGS_TRUTH_MIN_MQ QUILT2_WGS_TRUTH_MIN_MQ_RANK_SUM \
-        QUILT2_WGS_TRUTH_MIN_READ_POS_RANK_SUM; do
-        value="${!name}"
-        is_numeric "${value}" || { echo "[ERROR] ${name} must be numeric (found '${value}')." >&2; return 1; }
-    done
     if [[ ! "${QUILT2_WGS_TRUTH_MIN_GQ}" =~ ^[0-9]+$ ]] || \
        (( QUILT2_WGS_TRUTH_MIN_GQ < 0 || QUILT2_WGS_TRUTH_MIN_GQ > 99 )); then
         echo "[ERROR] QUILT2_WGS_TRUTH_MIN_GQ must be an integer from 0 to 99." >&2
@@ -135,7 +127,7 @@ validate_config() {
 }
 
 validate_config
-echo "[INFO] WGS truth filters: enabled=${QUILT2_WGS_TRUTH_FILTER_ENABLED}; QUAL>=${QUILT2_WGS_TRUTH_MIN_QUAL}; QD>=${QUILT2_WGS_TRUTH_MIN_QD}; SOR<=${QUILT2_WGS_TRUTH_MAX_SOR}; FS<=${QUILT2_WGS_TRUTH_MAX_FS}; MQ>=${QUILT2_WGS_TRUTH_MIN_MQ}; MQRankSum>=${QUILT2_WGS_TRUTH_MIN_MQ_RANK_SUM}; ReadPosRankSum>=${QUILT2_WGS_TRUTH_MIN_READ_POS_RANK_SUM}; GQ>=${QUILT2_WGS_TRUTH_MIN_GQ}; DP>=${QUILT2_WGS_TRUTH_MIN_DP}" >&2
+echo "[INFO] WGS truth genotype filters: enabled=${QUILT2_WGS_TRUTH_FILTER_ENABLED}; GQ>=${QUILT2_WGS_TRUTH_MIN_GQ}; DP>=${QUILT2_WGS_TRUTH_MIN_DP}" >&2
 
 if [[ -n "${IMPUTED}" && -n "${CHUNKS_DIR}" ]] || [[ -z "${IMPUTED}" && -z "${CHUNKS_DIR}" ]]; then
     echo "[ERROR] Specify exactly one of --imputed or --chunks-dir." >&2
@@ -445,11 +437,8 @@ prepare_run() {
         file_metadata "${REFERENCE_FASTA}"
         file_metadata "${REFERENCE_FASTA}.fai"
         printf 'chromosomes=%s\nregion=%s\nsamples=%s\n' "${selected_csv}" "${NORMALIZED_REGION:-ALL}" "${sample_csv}"
-        printf 'filter=%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
-            "${QUILT2_WGS_TRUTH_FILTER_ENABLED}" "${QUILT2_WGS_TRUTH_MIN_QUAL}" "${QUILT2_WGS_TRUTH_MIN_QD}" \
-            "${QUILT2_WGS_TRUTH_MAX_SOR}" "${QUILT2_WGS_TRUTH_MAX_FS}" "${QUILT2_WGS_TRUTH_MIN_MQ}" \
-            "${QUILT2_WGS_TRUTH_MIN_MQ_RANK_SUM}" "${QUILT2_WGS_TRUTH_MIN_READ_POS_RANK_SUM}" \
-            "${QUILT2_WGS_TRUTH_MIN_GQ}" "${QUILT2_WGS_TRUTH_MIN_DP}"
+        printf 'filter=%s|%s|%s\n' \
+            "${QUILT2_WGS_TRUTH_FILTER_ENABLED}" "${QUILT2_WGS_TRUTH_MIN_GQ}" "${QUILT2_WGS_TRUTH_MIN_DP}"
         cat "${tasks_tmp}" "${samples_tmp}"
     } > "${signature_payload}"
     new_signature="$(hash_file "${signature_payload}")"
@@ -503,13 +492,6 @@ prepare_run() {
         printf 'samples\t%s\n' "${sample_csv}"
         printf 'run_signature\t%s\n' "${new_signature}"
         printf 'QUILT2_WGS_TRUTH_FILTER_ENABLED\t%s\n' "${QUILT2_WGS_TRUTH_FILTER_ENABLED}"
-        printf 'QUILT2_WGS_TRUTH_MIN_QUAL\t%s\n' "${QUILT2_WGS_TRUTH_MIN_QUAL}"
-        printf 'QUILT2_WGS_TRUTH_MIN_QD\t%s\n' "${QUILT2_WGS_TRUTH_MIN_QD}"
-        printf 'QUILT2_WGS_TRUTH_MAX_SOR\t%s\n' "${QUILT2_WGS_TRUTH_MAX_SOR}"
-        printf 'QUILT2_WGS_TRUTH_MAX_FS\t%s\n' "${QUILT2_WGS_TRUTH_MAX_FS}"
-        printf 'QUILT2_WGS_TRUTH_MIN_MQ\t%s\n' "${QUILT2_WGS_TRUTH_MIN_MQ}"
-        printf 'QUILT2_WGS_TRUTH_MIN_MQ_RANK_SUM\t%s\n' "${QUILT2_WGS_TRUTH_MIN_MQ_RANK_SUM}"
-        printf 'QUILT2_WGS_TRUTH_MIN_READ_POS_RANK_SUM\t%s\n' "${QUILT2_WGS_TRUTH_MIN_READ_POS_RANK_SUM}"
         printf 'QUILT2_WGS_TRUTH_MIN_GQ\t%s\n' "${QUILT2_WGS_TRUTH_MIN_GQ}"
         printf 'QUILT2_WGS_TRUTH_MIN_DP\t%s\n' "${QUILT2_WGS_TRUTH_MIN_DP}"
     } > "${PENDING_MANIFEST}.tmp"
@@ -576,7 +558,6 @@ required_partition_paths() {
     local chromosome="$1"
     printf '%s\n' \
         "${OUT_PREFIX}/metrics/per_variant_metrics/CHROM=${chromosome}/part-000.parquet" \
-        "${OUT_PREFIX}/metrics/site_filtered_variants/CHROM=${chromosome}/part-000.parquet" \
         "${OUT_PREFIX}/metrics/imputed_only_variants/CHROM=${chromosome}/part-000.parquet" \
         "${OUT_PREFIX}/metrics/truth_only_variants/CHROM=${chromosome}/part-000.parquet" \
         "${OUT_PREFIX}/metrics/allele_mismatches/CHROM=${chromosome}/part-000.parquet"
@@ -592,6 +573,7 @@ run_worker() {
         echo "[ERROR] WGS run is not prepared: ${OUT_PREFIX}" >&2; exit 1;
     }
     read_task
+    echo "[INFO] Starting WGS chromosome task ${TASK_ID}: ${TASK_CHR}" >&2
     local run_signature checkpoint="${OUT_PREFIX}/intermediate/checkpoints/${TASK_CHR}.done" complete=true path
     run_signature="$(<"${SIGNATURE_FILE}")"
     if [[ "${FORCE}" != "true" && -f "${checkpoint}" && "$(<"${checkpoint}")" == "${run_signature}" ]]; then
@@ -612,6 +594,7 @@ run_worker() {
     has_index "${worker_imputed}" || { echo "[ERROR] Imputed VCF is not indexed: ${worker_imputed}" >&2; exit 1; }
     normalized_imputed="${TMP_DIR}/imputed.${TASK_CHR}.normalized.vcf.gz"
     normalized_truth="${TMP_DIR}/truth.${TASK_CHR}.normalized.vcf.gz"
+    echo "[INFO] ${TASK_CHR} phase 1/4: normalize imputed and truth VCFs" >&2
     normalize_chromosome "${worker_imputed}" "${TASK_CHR}" "${normalized_imputed}" imputed
     normalize_chromosome "${TASK_TRUTH_VCF}" "${TASK_CHR}" "${normalized_truth}" truth
     for input in "${normalized_imputed}" "${normalized_truth}"; do
@@ -621,6 +604,16 @@ run_worker() {
             exit 1
         }
     done
+
+    if [[ "${QUILT2_WGS_TRUTH_FILTER_ENABLED}" == "true" ]]; then
+        local truth_header="${TMP_DIR}/$(basename "${normalized_truth}").header.txt" field
+        for field in GQ DP; do
+            grep -q "^##FORMAT=<ID=${field}," "${truth_header}" || {
+                echo "[ERROR] Enabled WGS truth filtering requires FORMAT/${field}: ${TASK_TRUTH_VCF}" >&2
+                exit 1
+            }
+        done
+    fi
 
     local current_samples="${TMP_DIR}/current.samples.txt" sample_csv
     local isec_dir="${TMP_DIR}/isec.${TASK_CHR}" imputed_common_raw truth_common_raw
@@ -633,6 +626,7 @@ run_worker() {
     done
     sample_csv="$(paste -sd, "${COMMON_SAMPLES}")"
     threads="${SLURM_CPUS_PER_TASK:-1}"
+    echo "[INFO] ${TASK_CHR} phase 2/4: exact-allele bcftools isec" >&2
     bcftools isec --threads "${threads}" -c none -Oz -p "${isec_dir}" \
         "${normalized_imputed}" "${normalized_truth}"
     for isec_part in 0000 0001 0002 0003; do
@@ -661,32 +655,30 @@ run_worker() {
         bcftools query -s "${sample_csv}" -f '%CHROM\t%POS\t%REF\t%ALT\t%ID[\t%GT]\n' "${isec_dir}/0002.vcf.gz"
     } > "${imputed_common_raw}"
     {
-        printf 'CHROM\tPOS\tREF\tALT\tID\tQUAL\tQD\tSOR\tFS\tMQ\tMQRankSum\tReadPosRankSum'
+        printf 'CHROM\tPOS\tREF\tALT\tID'
         while IFS= read -r sample; do
             printf '\t%s.GT' "${sample}"
             [[ "${QUILT2_WGS_TRUTH_FILTER_ENABLED}" != "true" ]] || printf '\t%s.GQ\t%s.DP' "${sample}" "${sample}"
         done < "${COMMON_SAMPLES}"
         printf '\n'
         if [[ "${QUILT2_WGS_TRUTH_FILTER_ENABLED}" == "true" ]]; then
-            truth_format='%CHROM\t%POS\t%REF\t%ALT\t%ID\t%QUAL\t%INFO/QD\t%INFO/SOR\t%INFO/FS\t%INFO/MQ\t%INFO/MQRankSum\t%INFO/ReadPosRankSum[\t%GT\t%GQ\t%DP]\n'
+            truth_format='%CHROM\t%POS\t%REF\t%ALT\t%ID[\t%GT\t%GQ\t%DP]\n'
         else
-            truth_format='%CHROM\t%POS\t%REF\t%ALT\t%ID\t%QUAL\t%INFO/QD\t%INFO/SOR\t%INFO/FS\t%INFO/MQ\t%INFO/MQRankSum\t%INFO/ReadPosRankSum[\t%GT]\n'
+            truth_format='%CHROM\t%POS\t%REF\t%ALT\t%ID[\t%GT]\n'
         fi
         bcftools query -u -s "${sample_csv}" -f "${truth_format}" "${isec_dir}/0003.vcf.gz"
     } > "${truth_common_raw}"
 
+    echo "[INFO] ${TASK_CHR} phase 3/4: calculate GT metrics and write Parquet" >&2
     Rscript "${R_HELPER}" \
         --mode chromosome --chromosome "${TASK_CHR}" \
         --imputed-common-raw "${imputed_common_raw}" --truth-common-raw "${truth_common_raw}" \
         --imputed-only-raw "${imputed_only_raw}" --truth-only-raw "${truth_only_raw}" \
         --samples "${COMMON_SAMPLES}" --out-dir "${OUT_PREFIX}" \
         --filter-enabled "${QUILT2_WGS_TRUTH_FILTER_ENABLED}" \
-        --min-qual "${QUILT2_WGS_TRUTH_MIN_QUAL}" --min-qd "${QUILT2_WGS_TRUTH_MIN_QD}" \
-        --max-sor "${QUILT2_WGS_TRUTH_MAX_SOR}" --max-fs "${QUILT2_WGS_TRUTH_MAX_FS}" \
-        --min-mq "${QUILT2_WGS_TRUTH_MIN_MQ}" --min-mq-rank-sum "${QUILT2_WGS_TRUTH_MIN_MQ_RANK_SUM}" \
-        --min-read-pos-rank-sum "${QUILT2_WGS_TRUTH_MIN_READ_POS_RANK_SUM}" \
         --min-gq "${QUILT2_WGS_TRUTH_MIN_GQ}" --min-dp "${QUILT2_WGS_TRUTH_MIN_DP}"
 
+    echo "[INFO] ${TASK_CHR} phase 4/4: validate outputs and write checkpoint" >&2
     while IFS= read -r path; do [[ -s "${path}" ]] || { echo "[ERROR] Missing chromosome output: ${path}" >&2; exit 1; }; done < <(required_partition_paths "${TASK_CHR}")
     printf '%s\n' "${run_signature}" > "${checkpoint}.tmp.$$"
     mv "${checkpoint}.tmp.$$" "${checkpoint}"
@@ -700,6 +692,7 @@ run_finalize() {
     }
     local run_signature chromosome checkpoint path
     run_signature="$(<"${SIGNATURE_FILE}")"
+    echo "[INFO] WGS finalizer phase 1/2: validate chromosome checkpoints and outputs" >&2
     while IFS=$'\t' read -r _ chromosome _ _; do
         [[ "${chromosome}" == "chromosome" ]] && continue
         checkpoint="${OUT_PREFIX}/intermediate/checkpoints/${chromosome}.done"
@@ -707,15 +700,13 @@ run_finalize() {
             echo "[ERROR] Missing or stale chromosome checkpoint: ${chromosome}" >&2; exit 1;
         }
         while IFS= read -r path; do [[ -s "${path}" ]] || { echo "[ERROR] Missing chromosome output: ${path}" >&2; exit 1; }; done < <(required_partition_paths "${chromosome}")
+        echo "[INFO] Validated WGS chromosome output: ${chromosome}" >&2
     done < "${TASK_MANIFEST}"
 
+    echo "[INFO] WGS finalizer phase 2/2: aggregate chromosome summaries" >&2
     Rscript "${R_HELPER}" \
         --mode finalize --out-dir "${OUT_PREFIX}" --chromosome-manifest "${TASK_MANIFEST}" \
         --filter-enabled "${QUILT2_WGS_TRUTH_FILTER_ENABLED}" \
-        --min-qual "${QUILT2_WGS_TRUTH_MIN_QUAL}" --min-qd "${QUILT2_WGS_TRUTH_MIN_QD}" \
-        --max-sor "${QUILT2_WGS_TRUTH_MAX_SOR}" --max-fs "${QUILT2_WGS_TRUTH_MAX_FS}" \
-        --min-mq "${QUILT2_WGS_TRUTH_MIN_MQ}" --min-mq-rank-sum "${QUILT2_WGS_TRUTH_MIN_MQ_RANK_SUM}" \
-        --min-read-pos-rank-sum "${QUILT2_WGS_TRUTH_MIN_READ_POS_RANK_SUM}" \
         --min-gq "${QUILT2_WGS_TRUTH_MIN_GQ}" --min-dp "${QUILT2_WGS_TRUTH_MIN_DP}"
 
     cp "${PENDING_MANIFEST}" "${OUT_PREFIX}/run_manifest.tsv.tmp"
@@ -724,7 +715,6 @@ run_finalize() {
         printf 'finalizer_job_id\t%s\n' "${SLURM_JOB_ID:-NA}"
         printf 'per_sample_metrics\t%s\n' "${OUT_PREFIX}/per_sample_metrics.tsv"
         printf 'per_variant_metrics\t%s\n' "${OUT_PREFIX}/metrics/per_variant_metrics"
-        printf 'site_filtered_variants\t%s\n' "${OUT_PREFIX}/metrics/site_filtered_variants"
         printf 'imputed_only_variants\t%s\n' "${OUT_PREFIX}/metrics/imputed_only_variants"
         printf 'truth_only_variants\t%s\n' "${OUT_PREFIX}/metrics/truth_only_variants"
         printf 'allele_mismatches\t%s\n' "${OUT_PREFIX}/metrics/allele_mismatches"

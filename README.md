@@ -354,13 +354,13 @@ bash bin/dosage_r2_sbatch.sh \
 
 WGS mode discovers numerically ordered, indexed `Chr*_consolidated.vcf.gz` files in the GATK pipeline's `7.Consolidated_VCF` directory. It normalizes both sides against the same reference, keeps original biallelic SNP records, and runs `bcftools isec -c none` per chromosome. This requires identical `CHROM:POS:REF:ALT` alleles and produces separate exact-common, imputed-only, and truth-only sets before R reads any genotype table. `Chr00` is excluded unless it is explicitly requested and present on both sides.
 
-For each retained exact match, both GTs are converted to ALT counts (`0/0 = 0`, heterozygous = 1, `1/1 = 2`); phased and unphased calls are equivalent. Missing, haploid, or otherwise invalid GTs are masked only for that sample. Site failures remove the site for all samples, while a failing truth GQ/DP masks only that truth sample at that site; no call-rate filter is applied. Disabling WGS filtering skips the configurable site, GQ, and DP thresholds but still requires biallelic SNPs, exact allele matches, and valid diploid GTs. `FORMAT/DS` is neither required nor inspected.
+For each exact match, both GTs are converted to ALT counts (`0/0 = 0`, heterozygous = 1, `1/1 = 2`); phased and unphased calls are equivalent. Missing, haploid, or otherwise invalid GTs are masked only for that sample. Truth `GQ` and `DP` are the only configurable quality filters, and a failure masks only that truth sample at that site. There is no QUAL/QD/SOR/FS/MQ/rank-sum site filter and no call-rate filter. Disabling WGS filtering skips GQ/DP thresholds but still requires biallelic SNPs, exact allele matches, and valid diploid GTs. `FORMAT/DS` is neither required nor inspected.
 
 This deliberately measures hard-call GT agreement and correlation, matching the interpretation used by array mode. It does not measure calibration or uncertainty in QUILT2 posterior dosages.
 
-Configure WGS filtering in `config/environment.sh` (copied from `environment.template.sh`). Defaults are `QUAL >= 30`, `QD >= 2`, `SOR <= 3`, `FS <= 60`, `MQ >= 40`, `MQRankSum >= -12.5`, `ReadPosRankSum >= -8`, `GQ >= 60`, and `DP >= 10`. Missing QUAL, QD, or MQ fails a site; missing rank-sum annotations are allowed. Set `QUILT2_WGS_TRUTH_FILTER_ENABLED=false` to skip the configurable thresholds. These settings are ignored in array mode and are not duplicated as command-line options.
+Configure WGS filtering in `config/environment.sh` (copied from `environment.template.sh`). Defaults are `GQ >= 60` and `DP >= 10`. Set `QUILT2_WGS_TRUTH_FILTER_ENABLED=false` to skip both thresholds. These settings are ignored in array mode and are not duplicated as command-line options. Obsolete WGS site-filter variables in an existing environment file are reported and ignored.
 
-Only compact analytical outputs are retained. The exact common genotypes stay in task-local `$TMPDIR`; the persistent output contains root sample metrics, per-variant metrics, filtered/unique/mismatch audit tables, and compact chromosome sufficient statistics. The obsolete `QUILT2_WGS_KEEP_DOSAGE_MATRICES` setting is ignored with a warning.
+Only compact analytical outputs are retained. The exact common genotypes stay in task-local `$TMPDIR`; the persistent output contains root sample metrics, per-variant metrics, unique/mismatch audit tables, and compact chromosome sufficient statistics. The obsolete `QUILT2_WGS_KEEP_DOSAGE_MATRICES` setting is ignored with a warning.
 
 WGS mode from concatenated output:
 
@@ -384,7 +384,7 @@ bash bin/dosage_r2_sbatch.sh \
 
 Both examples use `QUILT2_REFERENCE_FASTA` from `config/environment.sh`. Pass `--reference-fasta` only when a run needs to override that configured reference.
 
-The submit wrapper creates one Slurm array task per chromosome, with concurrency managed by Slurm, and an `afterok` finalizer. Each chromosome task requests 2 CPUs and 12 GB by default. In `--chunks-dir` mode, each worker concatenates only its assigned chromosome; it does not create `imputed.all_chroms.vcf.gz`. Worker and finalizer resources are configured in `config/quilt2_config.sh`. When GNU `time` is available and its wrapper is not itself terminated by Slurm, each chromosome `.err` log receives one `[RESOURCE]` line reporting elapsed and CPU time, peak RSS, filesystem operations, and exit status for the complete worker.
+The submit wrapper creates one Slurm array task per chromosome, with concurrency managed by Slurm, and an `afterany` finalizer. Each chromosome task requests 2 CPUs and 12 GB by default. The finalizer runs after all array tasks reach a terminal state, verifies every chromosome checkpoint and output, and writes `.complete` only when all validations pass. A failed task therefore produces a short failed finalizer job instead of a permanently pending `DependencyNeverSatisfied` job. In `--chunks-dir` mode, each worker concatenates only its assigned chromosome; it does not create `imputed.all_chroms.vcf.gz`. Worker and finalizer resources are configured in `config/quilt2_config.sh`. When GNU `time` is available and its wrapper is not itself terminated by Slurm, each chromosome `.err` log receives one `[RESOURCE]` line reporting elapsed and CPU time, peak RSS, filesystem operations, and exit status for the complete worker.
 
 The default WGS output is `OUTPUT_DIR/eval/dosage_eval_wgs`:
 
@@ -394,7 +394,6 @@ dosage_eval_wgs/
 ├── run_manifest.tsv
 ├── metrics/
 │   ├── per_variant_metrics/CHROM=Chr01/part-000.parquet
-│   ├── site_filtered_variants/CHROM=Chr01/part-000.parquet
 │   ├── imputed_only_variants/CHROM=Chr01/part-000.parquet
 │   ├── truth_only_variants/CHROM=Chr01/part-000.parquet
 │   └── allele_mismatches/CHROM=Chr01/part-000.parquet
@@ -407,7 +406,7 @@ dosage_eval_wgs/
 └── slurm/
 ```
 
-`per_sample_metrics.tsv` is the visualization-ready deliverable at the run root. Its columns and worst-sample-first ordering match array mode: overall signed `r`, `r²`, usable variant count, and the same five 0.1-MAF-bin r/r²/count groups. Per-variant Parquet is also the retained exact-match table and contains `CHROM`, `POS`, `REF`, `ALT`, both input IDs, usable-pair count, truth ALT frequency/MAF, signed `r`, `r²`, and hard-call concordance. Per-variant `r/r²` is `NA` below three usable sample pairs or when either GT-count vector has zero variance; concordance is `NA` only when no pair is usable. Exact matches rejected by WGS site filters are retained separately in `site_filtered_variants`, including their failure reasons. `CHROM` is stored as a Hive partition column, so open the dataset directory rather than an individual part when chromosome values are needed. Large TSV duplicates are not written.
+`per_sample_metrics.tsv` is the visualization-ready deliverable at the run root. Its columns and worst-sample-first ordering match array mode: overall signed `r`, `r²`, usable variant count, and the same five 0.1-MAF-bin r/r²/count groups. Per-variant Parquet is also the exact-match table and contains `CHROM`, `POS`, `REF`, `ALT`, both input IDs, usable-pair count, truth ALT frequency/MAF, signed `r`, `r²`, and hard-call concordance. Per-variant `r/r²` is `NA` below three usable sample pairs or when either GT-count vector has zero variance; concordance is `NA` only when no pair is usable. `CHROM` is stored as a Hive partition column, so open the dataset directory rather than an individual part when chromosome values are needed. Large TSV duplicates are not written.
 
 Open all chromosome partitions as one Arrow dataset and extract only the rows needed for downstream analysis:
 
@@ -436,7 +435,7 @@ selected_samples <- sample_metrics[
 ]
 ```
 
-Resume uses chromosome checkpoints. A changed input, sample set, reference, chromosome selection, region, filter setting, or output schema changes the run signature and requires `--force` before an existing output can be reused. WGS outputs from the earlier DS schema are intentionally incompatible with `wgs-gt-isec-v4`; rerun them with `--force`. Array-mode caches are unaffected.
+Resume uses chromosome checkpoints. A changed input, sample set, reference, chromosome selection, region, filter setting, or output schema changes the run signature and requires `--force` before an existing output can be reused. WGS outputs from earlier schemas are intentionally incompatible with `wgs-gt-isec-v5`; rerun them with `--force`. Array-mode caches are unaffected.
 
 On Bunya, run the synthetic acceptance test after loading the same modules used for evaluation:
 

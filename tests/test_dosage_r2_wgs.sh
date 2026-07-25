@@ -167,6 +167,7 @@ bcftools index -t "${WORK_DIR}/truth/7.Consolidated_VCF/Chr02_consolidated.vcf.g
 OUT_ENABLED="${WORK_DIR}/output/dosage_eval_wgs"
 QUILT2_REFERENCE_FASTA="${WORK_DIR}/reference.fa" \
 QUILT2_WGS_KEEP_DOSAGE_MATRICES=true \
+QUILT2_WGS_TRUTH_MIN_QUAL=999 \
 SLURM_JOB_ID=test bash "${WRAPPER}" \
     --truth-mode wgs \
     --imputed "${WORK_DIR}/imputed.vcf.gz" \
@@ -174,16 +175,19 @@ SLURM_JOB_ID=test bash "${WRAPPER}" \
     --out-prefix "${OUT_ENABLED}" 2> "${WORK_DIR}/obsolete-setting.log"
 grep -Fq "QUILT2_WGS_KEEP_DOSAGE_MATRICES is obsolete and will be ignored" "${WORK_DIR}/obsolete-setting.log" \
     || fail "obsolete dosage-matrix setting was not reported"
+grep -Fq "Ignoring obsolete WGS site-filter settings" "${WORK_DIR}/obsolete-setting.log" \
+    || fail "obsolete site-filter setting was not reported"
 
 assert_file "${OUT_ENABLED}/per_sample_metrics.tsv"
 assert_file "${OUT_ENABLED}/run_manifest.tsv"
 assert_file "${OUT_ENABLED}/qc/filter_summary.tsv"
 assert_file "${OUT_ENABLED}/qc/genotype_masking_summary.tsv"
 for dataset in \
-    metrics/per_variant_metrics metrics/site_filtered_variants metrics/imputed_only_variants \
+    metrics/per_variant_metrics metrics/imputed_only_variants \
     metrics/truth_only_variants metrics/allele_mismatches; do
     assert_parquet "${OUT_ENABLED}/${dataset}"
 done
+[[ ! -e "${OUT_ENABLED}/metrics/site_filtered_variants" ]] || fail "obsolete site-filter dataset was written"
 [[ ! -e "${OUT_ENABLED}/per_variant_metrics.tsv" ]] || fail "large WGS TSV outputs should not be written"
 [[ ! -e "${OUT_ENABLED}/intermediate/imputed_ds" ]] || fail "obsolete imputed DS dataset was written"
 [[ ! -e "${OUT_ENABLED}/intermediate/truth_gt_dosage" ]] || fail "obsolete truth dosage dataset was written"
@@ -270,14 +274,14 @@ assert_parquet_r "${OUT_ENABLED}/metrics/per_variant_metrics" \
     'any(x$CHROM=="Chr01" & x$POS==230 & x$n_pairs==2 & is.na(x$r2))' "per-variant r2 must be NA below three pairs"
 assert_parquet_r "${OUT_ENABLED}/metrics/per_variant_metrics" \
     'any(x$CHROM=="Chr01" & x$POS==220 & is.na(x$r) & is.na(x$r2))' "zero-variance metric must be NA"
-assert_parquet_r "${OUT_ENABLED}/metrics/site_filtered_variants" \
-    'any(x$CHROM=="Chr01" & x$POS==130 & !x$site_filter_pass)' "QUAL failure did not remove the site globally"
 assert_parquet_r "${OUT_ENABLED}/metrics/per_variant_metrics" \
-    'any(x$CHROM=="Chr01" & x$POS==140)' "exact threshold boundary should pass"
+    'any(x$CHROM=="Chr01" & x$POS==130)' "obsolete QUAL filter was applied"
 assert_parquet_r "${OUT_ENABLED}/metrics/per_variant_metrics" \
-    'any(x$CHROM=="Chr01" & x$POS==150)' "missing rank-sum annotations should not fail"
-assert_parquet_r "${OUT_ENABLED}/metrics/site_filtered_variants" \
-    'any(x$CHROM=="Chr01" & x$POS==160 & !x$site_filter_pass)' "missing QD should fail"
+    'any(x$CHROM=="Chr01" & x$POS==140)' "GQ=60 and DP=10 threshold boundaries should pass"
+assert_parquet_r "${OUT_ENABLED}/metrics/per_variant_metrics" \
+    'any(x$CHROM=="Chr01" & x$POS==150)' "obsolete rank-sum filter was applied"
+assert_parquet_r "${OUT_ENABLED}/metrics/per_variant_metrics" \
+    'any(x$CHROM=="Chr01" & x$POS==160)' "obsolete QD filter was applied"
 assert_tsv "${OUT_ENABLED}/qc/genotype_masking_summary.tsv" '$1=="S1" && $2=="ALL" && $3=="truth_GQ_below_min" && $4==1 {ok=1} END {exit !ok}' "GQ boundary masking count is wrong"
 assert_tsv "${OUT_ENABLED}/qc/genotype_masking_summary.tsv" '$1=="S1" && $2=="ALL" && $3=="truth_DP_below_min" && $4==1 {ok=1} END {exit !ok}' "DP boundary masking count is wrong"
 assert_tsv "${OUT_ENABLED}/qc/genotype_masking_summary.tsv" '$1=="S1" && $2=="ALL" && $3=="imputed_missing_GT" && $4==1 {ok=1} END {exit !ok}' "missing imputed GT was not masked"
@@ -290,12 +294,14 @@ assert_parquet_r "${OUT_ENABLED}/metrics/truth_only_variants" 'any(x$CHROM=="Chr
 assert_parquet_r "${OUT_ENABLED}/metrics/per_variant_metrics" '!any(x$CHROM=="Chr01" & x$POS==200)' "multiallelic site should have been structurally excluded"
 grep -Fq $'QUILT2_WGS_TRUTH_MIN_GQ\t60' "${OUT_ENABLED}/run_manifest.tsv" || fail "default GQ was not recorded"
 grep -Fq $'QUILT2_WGS_TRUTH_MIN_DP\t10' "${OUT_ENABLED}/run_manifest.tsv" || fail "default DP was not recorded"
-grep -Fq $'output_schema\twgs-gt-isec-v4' "${OUT_ENABLED}/run_manifest.tsv" || fail "GT/isec schema was not recorded"
+grep -Fq $'output_schema\twgs-gt-isec-v5' "${OUT_ENABLED}/run_manifest.tsv" || fail "GT/isec schema was not recorded"
 grep -Fq $'comparison_field\tGT' "${OUT_ENABLED}/run_manifest.tsv" || fail "GT comparison field was not recorded"
 grep -Fq $'genotype_encoding\tALT_COUNT_0_1_2' "${OUT_ENABLED}/run_manifest.tsv" || fail "GT encoding was not recorded"
 grep -Fq $'intersection_key\tCHROM:POS:REF:ALT' "${OUT_ENABLED}/run_manifest.tsv" || fail "exact intersection key was not recorded"
 grep -Fq $'intersection_tool\tbcftools_isec' "${OUT_ENABLED}/run_manifest.tsv" || fail "intersection tool was not recorded"
 ! grep -q 'KEEP_DOSAGE\\|imputed_ds\\|truth_gt_dosage' "${OUT_ENABLED}/run_manifest.tsv" || fail "obsolete dosage outputs remain in the manifest"
+! grep -q 'MIN_QUAL\\|MIN_QD\\|MAX_SOR\\|MAX_FS\\|MIN_MQ\\|RANK_SUM' "${OUT_ENABLED}/run_manifest.tsv" \
+    || fail "obsolete site filters remain in the manifest"
 grep -Fq $'reference_fasta\t'"${WORK_DIR}/reference.fa" "${OUT_ENABLED}/run_manifest.tsv" || fail "configured reference FASTA was not used"
 
 # Resume should reuse only the completed WGS-mode output.
@@ -308,6 +314,14 @@ resume_message="$(SLURM_JOB_ID=test bash "${WRAPPER}" \
 # An incomplete run should skip valid chromosome checkpoints and rebuild only the missing chromosome.
 rm -f "${OUT_ENABLED}/.complete" "${OUT_ENABLED}/intermediate/checkpoints/Chr02.done"
 rm -f "${OUT_ENABLED}/metrics/per_variant_metrics/CHROM=Chr02/part-000.parquet"
+if QUILT2_REFERENCE_FASTA="${WORK_DIR}/reference.fa" bash "${ROOT_DIR}/modules/evaluate/dosage_r2_wgs.sh" \
+    --imputed "${WORK_DIR}/imputed.vcf.gz" \
+    --truth-dataset-dir "${WORK_DIR}/truth/7.Consolidated_VCF" \
+    --reference-fasta "${WORK_DIR}/reference.fa" --out-prefix "${OUT_ENABLED}" \
+    --finalize-only --task-manifest "${OUT_ENABLED}/intermediate/chromosome_tasks.tsv" >/dev/null 2>&1; then
+    fail "finalizer accepted a missing chromosome checkpoint"
+fi
+[[ ! -e "${OUT_ENABLED}/.complete" ]] || fail "failed finalization wrote .complete"
 partial_resume="$(SLURM_JOB_ID=test bash "${WRAPPER}" \
     --truth-mode wgs --imputed "${WORK_DIR}/imputed.vcf.gz" \
     --truth-dataset-dir "${WORK_DIR}/truth/7.Consolidated_VCF" \
@@ -316,16 +330,12 @@ partial_resume="$(SLURM_JOB_ID=test bash "${WRAPPER}" \
 [[ "${partial_resume}" == *"Completed WGS chromosome task 2: Chr02"* ]] || fail "resume did not rebuild the incomplete chromosome"
 assert_file "${OUT_ENABLED}/.complete"
 
-# Disabling filtering retains site failures and skips GQ/DP masking, but invalid GT still masks.
+# Disabling filtering skips GQ/DP masking, but invalid GT still masks.
 OUT_DISABLED="${WORK_DIR}/output/dosage_eval_wgs_unfiltered"
 QUILT2_WGS_TRUTH_FILTER_ENABLED=false SLURM_JOB_ID=test bash "${WRAPPER}" \
     --truth-mode wgs --imputed "${WORK_DIR}/imputed.vcf.gz" \
     --truth-dataset-dir "${WORK_DIR}/truth/7.Consolidated_VCF" \
     --reference-fasta "${WORK_DIR}/reference.fa" --out-prefix "${OUT_DISABLED}"
-assert_parquet_r "${OUT_DISABLED}/metrics/per_variant_metrics" \
-    'any(x$CHROM=="Chr01" & x$POS==130)' "disabled filtering still applied QUAL"
-assert_parquet_r "${OUT_DISABLED}/metrics/per_variant_metrics" \
-    'any(x$CHROM=="Chr01" & x$POS==160)' "disabled filtering still applied missing QD"
 assert_tsv "${OUT_DISABLED}/qc/genotype_masking_summary.tsv" '$1=="S1" && $2=="ALL" && $3=="truth_GQ_below_min" && $4==0 {ok=1} END {exit !ok}' "disabled filtering still applied GQ"
 assert_tsv "${OUT_DISABLED}/qc/genotype_masking_summary.tsv" '$1=="S1" && $2=="ALL" && $3=="truth_invalid_GT" && $4==1 {ok=1} END {exit !ok}' "disabled filtering weakened GT validation"
 
@@ -390,7 +400,7 @@ array_route="$(QUILT2_WGS_TRUTH_MIN_GQ=not-a-number SLURM_JOB_ID=test bash "${WR
 [[ "${array_route}" == *"modules/evaluate/dosage_r2.sh"* ]] || fail "array mode did not route to the original evaluator"
 [[ "${array_route}" != *"MIN_GQ must"* ]] || fail "array mode evaluated WGS-only configuration"
 
-# Submission mode should let Slurm manage array concurrency and use an afterok finalizer.
+# Submission mode should let Slurm manage array concurrency and use an afterany finalizer.
 MOCK_BIN="${WORK_DIR}/mock_bin"
 MOCK_SBATCH_LOG="${WORK_DIR}/mock_sbatch.log"
 MOCK_SBATCH_COUNTER="${WORK_DIR}/mock_sbatch.counter"
@@ -414,7 +424,7 @@ PATH="${MOCK_BIN}:${PATH}" QUILT2_REFERENCE_FASTA="${WORK_DIR}/reference.fa" bas
 sed -n '1p' "${MOCK_SBATCH_LOG}" | grep -Fq -- '--array=1-2' || fail "WGS chromosome array task range is incorrect"
 sed -n '1p' "${MOCK_SBATCH_LOG}" | grep -Eq -- '--array=[^ ]*%' && fail "WGS chromosome array has an unnecessary concurrency cap"
 sed -n '1p' "${MOCK_SBATCH_LOG}" | grep -Fq -- '--mem=12G' || fail "WGS chromosome array did not request 12G per task"
-sed -n '2p' "${MOCK_SBATCH_LOG}" | grep -Fq -- '--dependency=afterok:9001' || fail "WGS finalizer dependency is incorrect"
+sed -n '2p' "${MOCK_SBATCH_LOG}" | grep -Fq -- '--dependency=afterany:9001' || fail "WGS finalizer dependency is incorrect"
 WORKER_SCRIPT="$(find "${OUT_SUBMIT}/slurm" -maxdepth 1 -name 'dosage_r2_wgs_worker_*.sh' -print -quit)"
 [[ -n "${WORKER_SCRIPT}" ]] || fail "WGS worker script was not created"
 bash -n "${WORKER_SCRIPT}" || fail "generated WGS worker script has invalid shell syntax"
