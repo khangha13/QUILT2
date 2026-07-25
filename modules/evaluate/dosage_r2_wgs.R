@@ -58,6 +58,12 @@ atomic_parquet <- function(x, dataset_dir, chromosome) {
 }
 
 cor_from_sums <- function(n, sx, sy, sxx, syy, sxy, min_pairs) {
+  n <- as.numeric(n)
+  sx <- as.numeric(sx)
+  sy <- as.numeric(sy)
+  sxx <- as.numeric(sxx)
+  syy <- as.numeric(syy)
+  sxy <- as.numeric(sxy)
   numerator <- n * sxy - sx * sy
   vx <- n * sxx - sx * sx
   vy <- n * syy - sy * sy

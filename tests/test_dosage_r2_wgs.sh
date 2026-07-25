@@ -40,6 +40,41 @@ if (!isTRUE(eval(parse(text = args[[2]])))) quit(status = 1)
 RS
 }
 
+# Whole-chromosome sufficient statistics are read back from TSV as integers.
+# Verify that correlation products exceeding the 32-bit integer range are
+# promoted to doubles before the finalizer calculates r and r2.
+OVERFLOW_OUT="${WORK_DIR}/overflow_finalize"
+mkdir -p "${OVERFLOW_OUT}/intermediate/chromosome_stats" "${OVERFLOW_OUT}/qc/chromosomes"
+cat > "${OVERFLOW_OUT}/chromosome_tasks.tsv" <<'EOF'
+task_id	chromosome	truth_vcf	imputed_contig
+1	ChrTest	NA	NA
+EOF
+{
+    printf 'sample\tchromosome\tmaf_bin\tn\tsx\tsy\tsxx\tsyy\tsxy\n'
+    for bin in ALL '[0.0,0.1)' '[0.1,0.2)' '[0.2,0.3)' '[0.3,0.4)' '[0.4,0.5]'; do
+        printf 'S1\tChrTest\t%s\t1313738\t1313738\t1313738\t2627476\t2627476\t2627476\n' "${bin}"
+    done
+} > "${OVERFLOW_OUT}/intermediate/chromosome_stats/ChrTest.sample_stats.tsv"
+cat > "${OVERFLOW_OUT}/qc/chromosomes/ChrTest.filter_summary.tsv" <<'EOF'
+section	chromosome	reason	count	value
+variants	ChrTest	exact_matches	1313738	NA
+EOF
+cat > "${OVERFLOW_OUT}/qc/chromosomes/ChrTest.genotype_masking_summary.tsv" <<'EOF'
+sample	chromosome	reason	count
+S1	ChrTest	usable_pair	1313738
+EOF
+Rscript "${ROOT_DIR}/modules/evaluate/dosage_r2_wgs.R" \
+    --mode finalize --out-dir "${OVERFLOW_OUT}" \
+    --chromosome-manifest "${OVERFLOW_OUT}/chromosome_tasks.tsv" \
+    --filter-enabled true --min-gq 60 --min-dp 10 \
+    > /dev/null 2> "${OVERFLOW_OUT}/finalize.err" \
+    || fail "large sufficient-statistic finalization failed"
+! grep -Fq 'integer overflow' "${OVERFLOW_OUT}/finalize.err" \
+    || fail "large sufficient-statistic finalization overflowed"
+assert_tsv "${OVERFLOW_OUT}/per_sample_metrics.tsv" \
+    '$1=="S1" && $2==1 && $3==1 && $4==1313738 {ok=1} END {exit !ok}' \
+    "large sufficient-statistic correlation is incorrect"
+
 mkdir -p "${WORK_DIR}/truth/7.Consolidated_VCF"
 {
     printf '>Chr01\n'
