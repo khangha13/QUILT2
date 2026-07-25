@@ -205,6 +205,11 @@ canonical_chr() {
     printf 'Chr%02d\n' "${number}"
 }
 
+header_contigs() {
+    bcftools view -h "$1" \
+        | sed -n 's/^##contig=<ID=\([^,>]*\).*/\1/p'
+}
+
 declare -a TRUTH_CHROMS=() TRUTH_FILES=()
 truth_file_for_chr() {
     local wanted="$1" i
@@ -247,7 +252,7 @@ resolve_chunk_manifest() {
 }
 
 if [[ -n "${IMPUTED}" ]]; then
-    while IFS=$'\t' read -r source_chr _; do
+    while IFS= read -r source_chr; do
         if chr="$(canonical_chr "${source_chr}" 2>/dev/null)"; then
             imputed_contig_for_chr "${chr}" >/dev/null 2>&1 && {
                 echo "[ERROR] Multiple imputed contigs resolve to ${chr}." >&2; exit 1;
@@ -255,7 +260,7 @@ if [[ -n "${IMPUTED}" ]]; then
             IMPUTED_CHROMS+=("${chr}")
             IMPUTED_CONTIGS+=("${source_chr}")
         fi
-    done < <(bcftools index -s "${IMPUTED}")
+    done < <(header_contigs "${IMPUTED}")
 else
     resolve_chunk_manifest
     if [[ -n "${CHUNK_MANIFEST}" ]]; then
@@ -513,27 +518,23 @@ prepare_run() {
 }
 
 find_source_contig() {
-    local input="$1" wanted="$2" source _ canonical
-    while IFS=$'\t' read -r source _; do
+    local input="$1" wanted="$2" source canonical
+    while IFS= read -r source; do
         canonical="$(canonical_chr "${source}" 2>/dev/null || true)"
         [[ "${canonical}" == "${wanted}" ]] && { printf '%s\n' "${source}"; return 0; }
-    done < <(bcftools index -s "${input}")
+    done < <(header_contigs "${input}")
     return 1
 }
 
 normalize_chromosome() {
     local input="$1" chromosome="$2" output="$3" prefix="$4"
-    local source_chr source_region canonical threads rename_map="${TMP_DIR}/${prefix}.rename.tsv" region_tail=""
+    local source_chr source_region threads rename_map="${TMP_DIR}/${prefix}.rename.tsv" region_tail=""
     source_chr="$(find_source_contig "${input}" "${chromosome}")" || {
-        echo "[ERROR] ${chromosome} was not found in ${input}." >&2; exit 1;
+        echo "[ERROR] ${chromosome} was not declared in the VCF header: ${input}" >&2; exit 1;
     }
     [[ -z "${NORMALIZED_REGION}" ]] || region_tail="${NORMALIZED_REGION#${chromosome}}"
     source_region="${source_chr}${region_tail}"
-    : > "${rename_map}"
-    while IFS=$'\t' read -r source _; do
-        canonical="$(canonical_chr "${source}" 2>/dev/null || true)"
-        [[ -z "${canonical}" ]] || printf '%s\t%s\n' "${source}" "${canonical}" >> "${rename_map}"
-    done < <(bcftools index -s "${input}")
+    printf '%s\t%s\n' "${source_chr}" "${chromosome}" > "${rename_map}"
     threads="${SLURM_CPUS_PER_TASK:-1}"
     bcftools view -r "${source_region}" -Ou "${input}" \
         | bcftools annotate --rename-chrs "${rename_map}" -Ou \

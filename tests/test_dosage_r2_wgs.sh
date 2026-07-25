@@ -430,5 +430,7 @@ WORKER_SCRIPT="$(find "${OUT_SUBMIT}/slurm" -maxdepth 1 -name 'dosage_r2_wgs_wor
 bash -n "${WORKER_SCRIPT}" || fail "generated WGS worker script has invalid shell syntax"
 grep -Fq '/usr/bin/time' "${WORKER_SCRIPT}" || fail "WGS worker does not collect resource usage"
 grep -Fq '[RESOURCE]' "${WORKER_SCRIPT}" || fail "WGS worker resource summary is not labelled"
+! grep -Fq 'bcftools index -s' "${ROOT_DIR}/modules/evaluate/dosage_r2_wgs.sh" \
+    || fail "WGS contig discovery still requires optional index count metadata"
 
 echo "PASS: exact-isec WGS GT-to-GT integration tests"
