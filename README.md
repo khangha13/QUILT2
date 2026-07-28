@@ -4,6 +4,7 @@ SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C 
 
 ## Layout
 - `bin/run_quilt2.sh` – orchestrator; builds chunk manifest, generates SLURM array script, self-submits.
+- `bin/submit_ncbi_wgs_holdout_runs.sh` – submits the six filtered/no-filter NCBI WGS validation runs with target-sample exclusion.
 - `bin/dosage_r2_sbatch.sh` – SLURM submit wrapper for array or WGS truth evaluation.
 - `templates/quilt2_job.sh` – Phase 2 array worker; processes one chunk (prepare + impute).
 - `templates/quilt2_nomiss_job.sh` – Phase 1 array worker; standardises contig names and/or filters missing genotypes per chromosome.
@@ -32,6 +33,7 @@ SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C 
 ## Inputs
 - `--input-dir` (`WORK_DIR`): run directory for outputs, logs, temporary files, and default input discovery. This is **not necessarily** the reference panel directory.
 - `--bamlist`: text file listing the low-pass BAMs to impute. It is required for normal runs and `--impute-only`. If omitted, the script searches `WORK_DIR` for `bamlist.txt`, `bamlist.1.0.txt`, then `bamlist.tsv`.
+- `--exclude`: text file containing one reference-panel VCF sample ID per line. These samples are omitted when QUILT2 prepares the reference, which prevents validation targets from contributing their own reference haplotypes.
 - `--reference-panel-dir`: directory containing the phased reference panel VCFs. This is required, unless `QUILT2_REFERENCE_PANEL_DIR` is set in `config/environment.sh`.
 - `--output-dir`: persistent output directory. Defaults to `WORK_DIR/quilt2_output`.
 - `--scratch-dir`: optional scratch/staging root. If omitted, SLURM tasks use `$TMPDIR` when available; otherwise they use `OUTPUT_DIR/scratch`. Scratch is for disposable task-local files only.
@@ -45,6 +47,38 @@ Reference panel requirements:
 - VCFs must be bgzip-compressed and indexed (`.tbi` or `.csi`). The script tries to index `*.vcf.gz`, but pre-indexing avoids cluster-time failures.
 - Recommended chromosome naming is `Chr01`-`Chr17`. If the panel uses bare numeric contigs (`1`-`17`), the pipeline auto-detects this (by peeking at the first contig of each chromosome's panel VCF) and automatically renames them into `ChrNN` panel VCFs in `OUTPUT_DIR/panel/standardised/`. Pass `--standardise-name` to force this on regardless of detection, or `--no-standardise-name` to disable detection and always use the panel as-is. If the panel uses another convention, pre-standardise it or make sure `--chr`, the panel VCFs, and genetic maps all use the same names.
 - If panel variants contain missing or unphased genotypes, use `--remove-missing --min-valid-gt-rate <rate>` to create cleaned per-chromosome panel VCFs before imputation.
+
+Reference-sample exclusion for validation:
+- Pass `--exclude /path/to/accessions.txt`, where the file has no header and contains one exact reference-panel VCF sample ID per line.
+- The option applies the same exclusion list to every chromosome and every BAM in the run. It is passed to QUILT2 preparation as `--reference_exclude_samplelist_file`; the source panel VCFs are not modified.
+- Each chromosome worker intersects the requested IDs with the selected panel VCF header, logs the matched count and IDs, and ignores IDs absent from that panel. A Liao panel with no NCBI accessions therefore remains unchanged and produces an explicit warning.
+- The pipeline stores a normalised copy at `OUTPUT_DIR/inputs/reference_exclude_samples.txt` and records its source, sample IDs, count, and signature in `OUTPUT_DIR/run_manifest.tsv`.
+- Exclusion settings are part of the output cache identity. If an output directory was previously run with a different list, use a new `--output-dir`; legacy prepared-reference or imputed caches are rejected when `--exclude` is first introduced.
+
+Example exclusion file:
+
+```text
+ERR6395384
+ERR6395385
+ERR6909354
+SRR10538399
+SRR10541660
+SRR10541663
+SRR10983009
+```
+
+Example run:
+
+```bash
+bash bin/run_quilt2.sh \
+  --input-dir /path/to/quilt2_run_dir \
+  --output-dir /path/to/quilt2_output_target_excluded \
+  --bamlist /path/to/bamlist.txt \
+  --reference-panel-dir /path/to/phased_panel_vcfs \
+  --exclude /path/to/accessions.txt \
+  --genetic-map dummy \
+  --auto-chunk-map
+```
 
 ## Worked Example
 This example uses a fictional low-pass dataset named `Apple_LowPass_2026`.

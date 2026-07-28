@@ -13,7 +13,7 @@ fi
 source "${QUILT2_ROOT}/lib/functions.sh"
 
 if [ "$#" -lt 18 ]; then
-    log_error "Usage: quilt2_job.sh <WORK_DIR> <CHUNK_MANIFEST> <REFERENCE_PANEL_DIR> <GENETIC_MAP> <GENETIC_MAP_IS_DIR> <QUILT2_PREP_SCRIPT> <QUILT2_RUN_SCRIPT> <BAMLIST> <NGEN> <REMOVE_MISSING> <MIN_VALID_GT_RATE> <PREP_ONLY> <IMPUTE_ONLY> <OUTPUT_DIR> <CHUNK_IMPUTED_DIR> <PANEL_NOMISS_DIR> <RDATA_DIR> <SCRATCH_DIR> [BCFTOOLS_MODULE] [QUILT2_CONDA_ENV]"
+    log_error "Usage: quilt2_job.sh <WORK_DIR> <CHUNK_MANIFEST> <REFERENCE_PANEL_DIR> <GENETIC_MAP> <GENETIC_MAP_IS_DIR> <QUILT2_PREP_SCRIPT> <QUILT2_RUN_SCRIPT> <BAMLIST> <NGEN> <REMOVE_MISSING> <MIN_VALID_GT_RATE> <PREP_ONLY> <IMPUTE_ONLY> <OUTPUT_DIR> <CHUNK_IMPUTED_DIR> <PANEL_NOMISS_DIR> <RDATA_DIR> <SCRATCH_DIR> [BCFTOOLS_MODULE] [QUILT2_CONDA_ENV] [TRUTH_VCF] [EVAL_OUTPUT_DIR] [REFERENCE_EXCLUDE_FILE]"
     exit 1
 fi
 
@@ -41,6 +41,7 @@ QUILT2_CONDA_ENV="${20:-${QUILT2_CONDA_ENV:-quilt2}}"
 # Optional evaluation inputs (may be blank)
 TRUTH_VCF="${21:-}"
 EVAL_OUTPUT_DIR="${22:-}"
+REFERENCE_EXCLUDE_FILE="${23:-}"
 
 # Export flags for helper functions
 export REMOVE_MISSING MIN_VALID_GT_RATE PANEL_OUT_DIR
@@ -97,6 +98,30 @@ mkdir -p "${OUTPUT_DIR}" "${PANEL_OUT_DIR}" "${RDATA_DIR}" "${CHUNK_IMPUTED_DIR%
 # Panel VCF selection / optional missingness filtering
 panel_vcf="$(normalize_panel_vcf "${CHR}" "${REFERENCE_PANEL_DIR}")" || exit 1
 
+if [[ -n "${REFERENCE_EXCLUDE_FILE}" ]]; then
+    if [[ ! -f "${REFERENCE_EXCLUDE_FILE}" ]]; then
+        log_error "Reference exclusion file not found: ${REFERENCE_EXCLUDE_FILE}"
+        exit 1
+    fi
+    PANEL_SAMPLES_FILE="${TASK_SCRATCH_DIR}/reference_panel.samples.txt"
+    REFERENCE_EXCLUDE_EFFECTIVE_FILE="${TASK_SCRATCH_DIR}/reference_exclude.effective.txt"
+    bcftools query -l "${panel_vcf}" | LC_ALL=C sort -u > "${PANEL_SAMPLES_FILE}"
+    comm -12 "${REFERENCE_EXCLUDE_FILE}" "${PANEL_SAMPLES_FILE}" > "${REFERENCE_EXCLUDE_EFFECTIVE_FILE}"
+    REFERENCE_EXCLUDE_REQUESTED_COUNT="$(wc -l < "${REFERENCE_EXCLUDE_FILE}" | tr -d '[:space:]')"
+    REFERENCE_EXCLUDE_EFFECTIVE_COUNT="$(wc -l < "${REFERENCE_EXCLUDE_EFFECTIVE_FILE}" | tr -d '[:space:]')"
+    if [[ "${REFERENCE_EXCLUDE_EFFECTIVE_COUNT}" -gt 0 ]]; then
+        log_info "Reference exclusions matched ${REFERENCE_EXCLUDE_EFFECTIVE_COUNT}/${REFERENCE_EXCLUDE_REQUESTED_COUNT} requested sample ID(s): $(paste -sd, "${REFERENCE_EXCLUDE_EFFECTIVE_FILE}")"
+        if [[ "${REFERENCE_EXCLUDE_EFFECTIVE_COUNT}" -lt "${REFERENCE_EXCLUDE_REQUESTED_COUNT}" ]]; then
+            log_warn "Requested exclusion IDs absent from this panel: $(comm -23 "${REFERENCE_EXCLUDE_FILE}" "${PANEL_SAMPLES_FILE}" | paste -sd, -)"
+        fi
+    else
+        log_warn "None of the ${REFERENCE_EXCLUDE_REQUESTED_COUNT} requested exclusion IDs occur in ${panel_vcf}; this panel is unchanged."
+        REFERENCE_EXCLUDE_EFFECTIVE_FILE=""
+    fi
+else
+    REFERENCE_EXCLUDE_EFFECTIVE_FILE=""
+fi
+
 # Validate BAM list (always required for impute; not needed only when PREP_ONLY)
 if [[ "${PREP_ONLY}" != "true" ]]; then
     if [[ -z "${BAMLIST}" || ! -f "${BAMLIST}" ]]; then
@@ -138,6 +163,9 @@ prepare_reference_chunk() {
         "--buffer=${buffer}"
         "--outputdir=${RDATA_DIR}"
     )
+    if [[ -n "${REFERENCE_EXCLUDE_EFFECTIVE_FILE}" ]]; then
+        cmd+=("--reference_exclude_samplelist_file=${REFERENCE_EXCLUDE_EFFECTIVE_FILE}")
+    fi
 
     run_cmd "${cmd[@]}"
     echo "${prepared_file}"

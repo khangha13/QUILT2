@@ -45,6 +45,8 @@ Core options:
   --buffer N                   Buffer bp (default 500000)
   --n-gen N                    nGen passed to QUILT2 (default 100)
   --bamlist PATH               BAM list (defaults to <work_dir>/bamlist.txt or bamlist.1.0.txt)
+  --exclude FILE               One-column list of reference-panel sample IDs to exclude
+                                while preparing the QUILT2 reference
   --output-dir PATH            Persistent output directory (default <work_dir>/quilt2_output)
   --scratch-dir PATH           Optional scratch/staging root (default task $TMPDIR, then <output-dir>/scratch)
   --reference-fasta PATH       Reference FASTA (with .fai); used to fix VCF headers with missing contigs
@@ -88,6 +90,7 @@ REFERENCE_PANEL_DIR="${QUILT2_REFERENCE_PANEL_DIR:-}"
 GENETIC_MAP_FILE="${QUILT2_GENETIC_MAP:-}"
 REFERENCE_FASTA="${QUILT2_REFERENCE_FASTA:-${PIPELINE_REFERENCE_FASTA:-}}"
 BAMLIST="${QUILT2_BAMLIST:-}"
+REFERENCE_EXCLUDE_FILE=""
 CHROM_ARG=""
 REGION_START="${QUILT2_REGION_START:-1}"
 REGION_END="${QUILT2_REGION_END:-}"
@@ -121,6 +124,7 @@ while [[ $# -gt 0 ]]; do
         --genetic-map) GENETIC_MAP_FILE="$2"; shift 2 ;;
         --reference-fasta) REFERENCE_FASTA="$2"; shift 2 ;;
         --bamlist) BAMLIST="$2"; shift 2 ;;
+        --exclude|--reference-exclude-samples) REFERENCE_EXCLUDE_FILE="$2"; shift 2 ;;
         --chr) CHROM_ARG="$2"; shift 2 ;;
         --region-start) REGION_START="$2"; shift 2 ;;
         --region-end) REGION_END="$2"; shift 2 ;;
@@ -200,6 +204,91 @@ mkdir -p \
     "${SLURM_PHASE2_LOG_DIR}"
 MISSING_REPORT="${PANEL_NOMISS_DIR}/missing_sites_removed.tsv"
 NOMISS_FAIL_FLAG="${LOG_DIR}/quilt2_nomiss_failed.flag"
+
+REFERENCE_EXCLUDE_SOURCE=""
+REFERENCE_EXCLUDE_COUNT="0"
+REFERENCE_EXCLUDE_SIGNATURE="none"
+REFERENCE_EXCLUDE_SAMPLES="<none>"
+if [[ -n "${REFERENCE_EXCLUDE_FILE}" ]]; then
+    if [[ ! -f "${REFERENCE_EXCLUDE_FILE}" ]]; then
+        log_error "Reference exclusion file not found: ${REFERENCE_EXCLUDE_FILE}"
+        exit 1
+    fi
+    REFERENCE_EXCLUDE_SOURCE="$(cd "$(dirname "${REFERENCE_EXCLUDE_FILE}")" && pwd)/$(basename "${REFERENCE_EXCLUDE_FILE}")"
+
+    if ! awk '
+        /^[[:space:]]*($|#)/ { next }
+        NF != 1 { exit 1 }
+        { found = 1 }
+        END { if (!found) exit 1 }
+    ' "${REFERENCE_EXCLUDE_SOURCE}"; then
+        log_error "--exclude must contain at least one sample ID and exactly one ID per non-comment line: ${REFERENCE_EXCLUDE_SOURCE}"
+        exit 1
+    fi
+
+    REFERENCE_EXCLUDE_SAMPLES="$(
+        awk '!/^[[:space:]]*($|#)/ { print $1 }' "${REFERENCE_EXCLUDE_SOURCE}" |
+            LC_ALL=C sort -u |
+            paste -sd, -
+    )"
+    REFERENCE_EXCLUDE_COUNT="$(
+        awk '!/^[[:space:]]*($|#)/ { print $1 }' "${REFERENCE_EXCLUDE_SOURCE}" |
+            LC_ALL=C sort -u |
+            wc -l |
+            tr -d '[:space:]'
+    )"
+    REFERENCE_EXCLUDE_SIGNATURE="$(
+        awk '!/^[[:space:]]*($|#)/ { print $1 }' "${REFERENCE_EXCLUDE_SOURCE}" |
+            LC_ALL=C sort -u |
+            cksum |
+            awk '{ print $1 ":" $2 }'
+    )"
+fi
+
+REFERENCE_EXCLUDE_SIGNATURE_FILE="${OUTPUT_DIR}/.reference_exclude_signature"
+EXISTING_REFERENCE_CACHE="$(
+    find "${RDATA_DIR}" "${CHUNK_IMPUTED_DIR}" -type f \
+        \( -name '*.RData' -o -name '*.vcf.gz' \) -print -quit 2>/dev/null || true
+)"
+if [[ -f "${REFERENCE_EXCLUDE_SIGNATURE_FILE}" ]]; then
+    EXISTING_REFERENCE_EXCLUDE_SIGNATURE="$(tr -d '[:space:]' < "${REFERENCE_EXCLUDE_SIGNATURE_FILE}")"
+    if [[ "${EXISTING_REFERENCE_EXCLUDE_SIGNATURE}" != "${REFERENCE_EXCLUDE_SIGNATURE}" ]]; then
+        if [[ -n "${EXISTING_REFERENCE_CACHE}" ]]; then
+            log_error "Reference exclusion settings differ from the existing output cache."
+            log_error "Use a new --output-dir, or remove the old prepared-reference and imputed outputs before reusing this directory."
+            exit 1
+        fi
+        printf '%s\n' "${REFERENCE_EXCLUDE_SIGNATURE}" > "${REFERENCE_EXCLUDE_SIGNATURE_FILE}"
+    fi
+else
+    if [[ "${REFERENCE_EXCLUDE_SIGNATURE}" != "none" && -n "${EXISTING_REFERENCE_CACHE}" ]]; then
+        log_error "--exclude cannot be applied to an output directory containing legacy prepared-reference or imputed caches: ${OUTPUT_DIR}"
+        log_error "Use a new --output-dir so the target-excluded reference is prepared from scratch."
+        exit 1
+    fi
+    printf '%s\n' "${REFERENCE_EXCLUDE_SIGNATURE}" > "${REFERENCE_EXCLUDE_SIGNATURE_FILE}"
+fi
+
+if [[ -n "${REFERENCE_EXCLUDE_SOURCE}" ]]; then
+    EXCLUDE_INPUT_DIR="${OUTPUT_DIR}/inputs"
+    EXCLUDE_SNAPSHOT="${EXCLUDE_INPUT_DIR}/reference_exclude_samples.txt"
+    EXCLUDE_SNAPSHOT_TMP="${EXCLUDE_SNAPSHOT}.tmp.$$"
+    mkdir -p "${EXCLUDE_INPUT_DIR}"
+    awk '!/^[[:space:]]*($|#)/ { print $1 }' "${REFERENCE_EXCLUDE_SOURCE}" |
+        LC_ALL=C sort -u > "${EXCLUDE_SNAPSHOT_TMP}"
+    if [[ -f "${EXCLUDE_SNAPSHOT}" ]] && cmp -s "${EXCLUDE_SNAPSHOT_TMP}" "${EXCLUDE_SNAPSHOT}"; then
+        rm -f "${EXCLUDE_SNAPSHOT_TMP}"
+    else
+        mv -f "${EXCLUDE_SNAPSHOT_TMP}" "${EXCLUDE_SNAPSHOT}"
+    fi
+    REFERENCE_EXCLUDE_FILE="${EXCLUDE_SNAPSHOT}"
+else
+    REFERENCE_EXCLUDE_FILE=""
+fi
+
+if [[ -n "${REFERENCE_EXCLUDE_FILE}" ]]; then
+    log_info "Reference exclusion list: ${REFERENCE_EXCLUDE_FILE} (${REFERENCE_EXCLUDE_COUNT} unique sample ID(s))"
+fi
 
 if [[ "${SUBMIT_SELF}" == "true" && -z "${SLURM_JOB_ID:-}" ]]; then
     MASTER_SCRIPT="${SLURM_SCRIPT_DIR}/quilt2_master_$(date +%Y%m%d_%H%M%S).sh"
@@ -701,6 +790,11 @@ SCRATCH_DISPLAY="${SCRATCH_DIR:-task TMPDIR or ${OUTPUT_DIR}/scratch}"
     printf "scratch_dir\t%s\n" "${SCRATCH_DISPLAY}"
     printf "reference_panel_dir\t%s\n" "${REFERENCE_PANEL_DIR}"
     printf "phase2_panel_dir\t%s\n" "${PHASE2_PANEL_DIR}"
+    printf "reference_exclude_source\t%s\n" "${REFERENCE_EXCLUDE_SOURCE:-<none>}"
+    printf "reference_exclude_file\t%s\n" "${REFERENCE_EXCLUDE_FILE:-<none>}"
+    printf "reference_exclude_sample_count\t%s\n" "${REFERENCE_EXCLUDE_COUNT}"
+    printf "reference_exclude_samples\t%s\n" "${REFERENCE_EXCLUDE_SAMPLES}"
+    printf "reference_exclude_signature\t%s\n" "${REFERENCE_EXCLUDE_SIGNATURE}"
     printf "bamlist\t%s\n" "${BAMLIST:-<none>}"
     printf "genetic_map\t%s\n" "${GENETIC_MAP_FILE}"
     printf "genetic_map_is_dir\t%s\n" "${GENETIC_MAP_IS_DIR}"
@@ -772,7 +866,8 @@ bash "${TEMPLATE}" \
   "${BCFTOOLS_MODULE}" \
   "${QUILT2_CONDA_ENV}" \
   "${TRUTH_VCF}" \
-  "${EVAL_OUTPUT_DIR:-${EVAL_DEFAULT_DIR}}"
+  "${EVAL_OUTPUT_DIR:-${EVAL_DEFAULT_DIR}}" \
+  "${REFERENCE_EXCLUDE_FILE}"
 EOF
 } > "${SLURM_SCRIPT}"
 chmod +x "${SLURM_SCRIPT}"
