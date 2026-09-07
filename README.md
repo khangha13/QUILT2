@@ -14,6 +14,9 @@ SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C 
 - `modules/evaluate/concat_imputed.sh` – stitches per-chunk imputed VCFs into per-chromosome/genome-wide VCFs.
 - `modules/evaluate/dosage_r2.sh` + `dosage_r2.R` – array-truth GT-to-GT evaluation.
 - `modules/evaluate/dosage_r2_wgs.sh` + `dosage_r2_wgs.R` – exact-allele WGS-truth GT-to-GT evaluation.
+- `utils/extract_quilt2_parameter_validation.sh` – Bunya-only retrospective extraction using the intersection of six Array and six WGS evaluations as the starting mask, with reported GT correctness regardless of GP confidence and all emitted QUILT2 fields in one Parquet.
+- `utils/extract_array_evaluation_positions.R` – focused Arrow helper that reads `CHROM`/`POS` from an Array `concordance.parquet` file or a WGS `per_variant_metrics` Parquet dataset.
+- `analysis/quilt2_parameter_validation/quilt2_parameter_validation.qmd` – one-input Quarto report for overall GT accuracy, INFO_SCORE rank validation, and HWE association plots; probability calibration is not assessed.
 - `quilt2_pipeline.legacy.sh` – pre-array monolithic script (kept only for rollback).
 - `quilt2_past_problem_and_solution.md` – troubleshooting history.
 - `dummy_map.md` – guide for creating dummy genetic maps when a species-specific map is unavailable.
@@ -288,6 +291,208 @@ OUTPUT_DIR/
 
 ## Troubleshooting
 See `quilt2_past_problem_and_solution.md` for fixes on genetic map columns, chr naming, symlinks, chunk parsing, phased panel requirements, and cache invalidation. Use `--dry-run` first to ensure SLURM script generation succeeds before submitting.
+
+## Retrospective QUILT2 parameter validation
+
+This workflow reuses completed 2× QUILT2 runs; it does not rerun QUILT2,
+BEAGLE, or GATK. Its six logical conditions are Filtered/No-filter ×
+Liao/NCBI/Combined. Because the 18 Array targets and seven WGS targets were
+imputed in separate physical runs, the extraction manifest has 12 rows: one
+Array and one WGS source for each logical condition.
+
+Agreed simplification: assess how accurate the reported GT calls are regardless
+of GP confidence. The report replaces the GP reliability curve and the two
+GP-bin heatmaps with one overall GT-accuracy plot and a counts table by
+treatment. It does not select a GP-argmax genotype, group or filter calls by GP,
+or calculate accuracy-minus-confidence gaps. This compromises the original
+parameter-calibration objective: the report cannot assess GP calibration,
+over/under-confidence, or the performance of a GP cutoff. INFO_SCORE and HWE
+remain descriptive associations with reported GT correctness.
+
+Copy the supplied run manifest before running:
+
+```bash
+cp analysis/quilt2_parameter_validation/run_manifest.example.tsv \
+  analysis/quilt2_parameter_validation/run_manifest.bunya.tsv
+```
+
+The supplied paths follow the updated `scratch_structure.txt`, rooted at
+`/scratch/project_mnt/S0218` as specified for the Array inputs. Verify their
+availability on Bunya. Array rows use the existing
+`chunks/imputed/imputed.all_chroms.vcf.gz` files. The six unbiased WGS rows use
+the holdout runs under
+`/scratch/project_mnt/S0218/downsampling/NCBI_downsampling_imputed/`:
+
+| Treatment | Panel | WGS input directory relative to that base |
+|---|---|---|
+| Filtered | Liao | `filter/NCBI_WGS_Liao_holdout/chunks/imputed` |
+| Filtered | NCBI | `filter/NCBI_WGS_NCBI_holdout/chunks/imputed` |
+| Filtered | Combined | `filter/NCBI_WGS_Combined_holdout/chunks/imputed` |
+| No-filter | Liao | `no_filter/NCBI_WGS_no_filter_Liao_holdout/chunks/imputed` |
+| No-filter | NCBI | `no_filter/NCBI_WGS_no_filter_NCBI_holdout/chunks/imputed` |
+| No-filter | Combined | `no_filter/NCBI_WGS_no_filter_Combined_holdout/chunks/imputed` |
+
+The updated tree places all six WGS holdout runs under
+`NCBI_downsampling_imputed/`, including the three under its lowercase
+`no_filter/` subdirectory. The separate `downsampling/No_filter/` directory
+contains the Array runs. Do not substitute runs from
+`NCBI_downsampling_imputed_biased/`. All six WGS mask datasets are configured
+in `WGS_MASK_PARQUETS` immediately after the Array declarations; their run
+directories match the example manifest above. Each ends in
+`eval/dosage_eval_wgs/metrics/per_variant_metrics/` and is listed with 17
+`CHROM=ChrNN/part-000.parquet` partitions. These are tree-level checks;
+live file readability and data contents still require the Bunya preflight.
+
+WGS truth comes from
+`/QRISdata/Q8367/WGS_Reference_Panel/NCBI_truth_set/7.Consolidated_VCF/ChrNN_consolidated.vcf.gz`.
+`input_type=chunks` uses the
+overlap-aware chunk concatenator one chromosome at a time; `input_type=vcf`
+requires an indexed VCF/BCF. Both forms retain the original QUILT2 INFO and
+FORMAT values when selecting the 18 or seven target samples.
+
+The six Array concordance Parquet paths are hard-coded in
+`ARRAY_MASK_PARQUETS`, followed immediately by `WGS_MASK_PARQUETS` for the WGS
+evaluation dataset paths, near the top of
+`utils/extract_quilt2_parameter_validation.sh`; no mask-manifest argument is
+required. The Filtered Liao Array path ends in
+`eval/dosage_eval.concordance.parquet`; the other five end in
+`eval/dosage_eval/concordance.parquet`. These are the completed Array Group I/II
+2× evaluations. Their upstream standardisation supplies `Chr01`–`Chr17` names
+and unique `CHROM:POS` rows. The supplied Array output confirms the exact
+`CHROM` and `POS` columns; `ID`, `REF`, `ALT`, and the sample concordance columns
+are unnecessary for masking. In particular, `0`, `1`, and `NaN` are correctness
+results, not genotype dosages, and are not used to select mask positions.
+
+For WGS use the dataset directory
+`<WGS run>/eval/dosage_eval_wgs/metrics/per_variant_metrics`, not an individual
+`part-000.parquet` file or a per-sample summary. The evaluator stores `CHROM` in
+Hive partition directories such as `CHROM=Chr01`; each part supplies `POS`.
+The position helper opens either input form with Arrow, reads only `CHROM`/`POS`,
+selects chromosomes before collecting, and sorts. It performs no chromosome
+rewriting, coordinate repair, ID parsing, allele inference, or duplicate-row
+removal. Extraction requires the R packages `arrow`, `data.table`, `dplyr`,
+`digest`, and `jsonlite`.
+
+The shell intersects all twelve position lists once and applies that same mask
+file to Array truth, WGS truth, and all 12 QUILT2 physical sources. Each source
+contributes presence at most once per position, regardless of row order or
+repeated records. Missing sample concordance, `n_pairs`, or other metrics do not
+affect membership. No separate WGS analysis mask is constructed.
+Array truth is still required downstream
+for A/B-to-ALT dosage conversion and correctness. WGS truth GT is decoded after
+exact REF/ALT matching; GQ ≥ 60 and DP ≥ 10 determine individual truth-call
+validity and do not remove positions from this mask.
+
+The final exact-allele mask can be smaller than this twelve-run position
+intersection: every retained record must also be a unique biallelic SNP with
+compatible alleles in all 12 physical QUILT2 outputs and WGS truth. This final
+restriction is shared by the Array and WGS rows. Both mask counts and hashes
+are recorded so this attrition is explicit.
+
+Sample selection affects only the retained FORMAT columns. QUILT2 site-level
+INFO fields are preserved exactly as emitted and are not recomputed for the
+selected subset. The source's original sample count and complete sample-list
+hash are embedded so this retrospective scope remains auditable.
+
+Run a header/sample/dependency preflight without writing data:
+
+```bash
+bash utils/extract_quilt2_parameter_validation.sh \
+  --run-manifest analysis/quilt2_parameter_validation/run_manifest.bunya.tsv \
+  --array-truth /path/to/array_truth.vcf.gz \
+  --output /path/to/quilt2_parameter_extract.parquet \
+  --dry-run
+```
+
+Run the Chr01 pilot through Slurm:
+
+```bash
+sbatch utils/extract_quilt2_parameter_validation.sh \
+  --run-manifest analysis/quilt2_parameter_validation/run_manifest.bunya.tsv \
+  --array-truth /path/to/array_truth.vcf.gz \
+  --output /path/to/quilt2_parameter_extract.Chr01.parquet \
+  --chr Chr01
+```
+
+After pilot acceptance, omit `--chr` for Chr01–Chr17. The script defaults to the
+repository's Bunya reference FASTA and WGS truth directory; override them with
+`--reference-fasta` and `--wgs-truth-dir` if those datasets move. Existing final
+outputs are preserved unless `--force` is supplied, and even then replacement
+occurs only after the new extraction completes.
+
+The primary output is the only data input read by Quarto:
+
+```text
+quilt2_parameter_extract.parquet
+```
+
+The adjacent `.sha256`, `.common_loci.tsv.gz`, and `.summary.tsv` files are
+audit sidecars. Complete candidate headers, dynamic INFO/FORMAT definitions,
+source signatures, candidate checksums, sample mapping, thresholds, all twelve
+evaluation artifacts, and both mask stages are embedded in Parquet
+metadata. Site values are compressed with ZSTD and dictionary encoding.
+Array mask-source checksums hash the input file; WGS checksums hash a sorted
+TSV of each Parquet part's SHA-256 and absolute path. The precise checksum
+definition is embedded alongside the source paths and position hashes.
+
+The extractor writes schema `quilt2-parameter-validation-v4`, which the updated
+report requires. Its `accuracy_target=reported_gt` and `analysis_compromise`
+metadata record the agreed simplification; the compromise is also included in
+the extraction log, summary sidecar, and report provenance. All emitted GP
+fields and their expanded components remain in the Parquet for future work.
+`gp_valid` now describes probability-vector validity only (three finite values
+in [0,1] with an acceptable sum; tied maxima are allowed). Missing or malformed
+GP does not invalidate an otherwise evaluable GT. GP confidence, GP-argmax
+correctness, and GT-versus-GP disagreement metrics are no longer derived.
+
+Render the report locally or on Bunya with exactly one data parameter:
+
+```bash
+quarto render \
+  analysis/quilt2_parameter_validation/quilt2_parameter_validation.qmd \
+  -P data_file:/path/to/quilt2_parameter_extract.parquet
+```
+
+Rendering requires Quarto and the R packages `arrow`, `dplyr`, `ggplot2`,
+`jsonlite`, `knitr`, `scales`, and `tibble`.
+
+Quarto selects only columns needed for each view. It does not open VCFs, call
+`bcftools`, harmonise alleles, derive truth dosage, or recalculate correctness
+or site `%CC`. The report does lightweight binning, chromosome-block
+jackknifing, tabulation, and plotting.
+
+Fixed-denominator hard-call metrics are defined only for 25/25 valid targets
+within a panel and 75/75 valid panel–target comparisons after pooling the three
+panels. Overall GT accuracy sums the precomputed correct-call counts and
+divides by the summed valid-call counts across all common-mask loci and three
+panels within each treatment. Valid calls at incomplete loci contribute, and
+unevaluable calls are reported separately. No GP, INFO_SCORE, or HWE selection
+is applied to this overall summary, and Quarto does not read GP columns.
+Truth validity requirements, including WGS GQ/DP, still apply.
+
+The plotted INFO_SCORE is an explicitly documented target-count-weighted summary of
+the separate Array/WGS emissions, followed by an equal mean over panels. HWE
+p-values are not averaged: the two physical target-run emissions are retained
+as separate observations and panel identity is not mapped to a plot aesthetic.
+
+Local validation is limited to static checks; pipeline execution and fixtures
+must run on Bunya. The Chr01 pilot, selected-row verification,
+manual dosage/correctness checks, comparison with the existing evaluator, and
+the full 17-chromosome run must be completed on Bunya. For the pilot, also
+confirm all twelve evaluator position counts, their intersection count,
+and the reported attrition from that position mask to the final exact-allele
+mask.
+Verify that a position absent from any one of the twelve inputs is excluded,
+while a position present in all twelve remains eligible for masking even with
+Array `NaN` concordance or incomplete WGS `n_pairs`. Check that WGS `CHROM` is
+recovered correctly from the partition directory. The Array heads supplied for
+review contain missing comparisons; they do not establish complete 25-call
+sites or whole-file uniqueness. Missing comparisons must remain explicit rather
+than being treated as incorrect or used to select positions.
+For the simplified analysis, also verify the v4 compromise metadata and that
+overall correct/valid counts equal the sums of the per-locus pooled counts.
+Check examples with low, missing, malformed, and tied GP: valid GT–truth
+comparisons must still contribute, with correctness determined solely by GT.
 
 ## Concordance & dosage r² (imputed vs truth)
 

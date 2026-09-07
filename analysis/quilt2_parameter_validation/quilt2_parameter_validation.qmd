@@ -1,0 +1,592 @@
+---
+title: "QUILT2 parameter validation"
+subtitle: "Overall reported GT accuracy and its associations with INFO_SCORE and HWE"
+format:
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: true
+execute:
+  echo: false
+  warning: false
+  message: false
+params:
+  data_file: null
+---
+
+```{r}
+#| label: setup
+suppressPackageStartupMessages({
+  library(arrow)
+  library(dplyr)
+  library(ggplot2)
+  library(jsonlite)
+  library(knitr)
+  library(scales)
+})
+
+if (is.null(params$data_file) || !nzchar(params$data_file)) {
+  stop("Set params$data_file to quilt2_parameter_extract.parquet.", call. = FALSE)
+}
+data_file <- normalizePath(params$data_file, mustWork = TRUE)
+if (!grepl("[.]parquet$", data_file, ignore.case = TRUE)) {
+  stop("params$data_file must be a Parquet file.", call. = FALSE)
+}
+
+reader <- ParquetFileReader$create(data_file)
+schema <- reader$GetSchema()
+parquet_metadata <- schema$metadata
+dataset <- open_dataset(data_file, format = "parquet")
+
+required_columns <- c(
+  "locus_id", "chrom", "pos", "run_id", "treatment", "panel", "truth_source",
+  "sample_id", "array_group", "mean_info_score", "info_plot_eligible",
+  "percent_correct_pooled", "pooled_site_eligible", "n_expected_pooled",
+  "n_valid_pooled", "n_correct_pooled", "info__hwe", "hwe_valid",
+  "percent_correct_panel", "site_cc_eligible", "n_expected_panel",
+  "n_valid_panel", "n_correct_panel"
+)
+missing_columns <- setdiff(required_columns, names(schema))
+if (length(missing_columns)) {
+  stop("Parquet is missing required columns: ", paste(missing_columns, collapse = ", "), call. = FALSE)
+}
+if (!identical(parquet_metadata$extraction_schema_version, "quilt2-parameter-validation-v4")) {
+  stop("This report requires v4 output with the twelve-run Array/WGS evaluation mask.", call. = FALSE)
+}
+required_metadata <- c(
+  "accuracy_target", "analysis_compromise",
+  "eval_mask_position_count", "eval_mask_sha256",
+  "eval_mask_manifest_sha256", "eval_mask_manifest_json",
+  "common_locus_count", "final_mask_attrition_from_eval", "mask_sha256",
+  "wgs_truth_min_gq", "wgs_truth_min_dp", "gp_sum_tolerance", "source_manifest_json"
+)
+missing_metadata <- required_metadata[!vapply(required_metadata, function(key) {
+  !is.null(parquet_metadata[[key]])
+}, logical(1))]
+if (length(missing_metadata)) {
+  stop("Parquet is missing required metadata: ", paste(missing_metadata, collapse = ", "), call. = FALSE)
+}
+if (!identical(parquet_metadata$accuracy_target, "reported_gt")) {
+  stop("Accuracy must refer to the reported GT call.", call. = FALSE)
+}
+
+treatment_levels <- c("Filtered", "No_filter")
+treatment_labels <- c(Filtered = "Filtered", No_filter = "No-filter")
+theme_set(theme_bw(base_size = 11))
+theme_report <- theme(
+  panel.grid.minor = element_blank(),
+  strip.background = element_rect(fill = "grey94", colour = "grey75"),
+  legend.position = "right"
+)
+
+assert_unique <- function(data, keys, label) {
+  duplicates <- data |>
+    count(across(all_of(keys)), name = "n") |>
+    filter(n != 1L)
+  if (nrow(duplicates)) stop(label, " is not unique at its declared grain.", call. = FALSE)
+}
+
+assert_true <- function(value, message) {
+  if (!isTRUE(value)) stop(message, call. = FALSE)
+}
+
+format_metadata <- function(key, fallback = NA_character_) {
+  value <- parquet_metadata[[key]]
+  if (is.null(value)) fallback else as.character(value)
+}
+```
+
+## Scope and interpretation
+
+Agreed compromise: this report asks how often the reported GT calls are correct,
+regardless of their GP confidence. It does not assess probability calibration,
+GP-argmax correctness, or whether a confidence threshold improves accuracy.
+GP bins, reliability curves, calibration-gap heatmaps, and GT-versus-GP-argmax
+comparisons have been removed. Missing, malformed, or tied GP does not exclude
+an otherwise evaluable GT call. Valid aligned truth is still required.
+
+This report evaluates whether QUILT2's emitted parameters describe observed
+imputation behaviour at the common loci. It does not estimate a causal filter
+effect. The starting position mask is the CHROM/POS intersection of loci present
+in all six completed Array concordance Parquets and all six WGS
+`per_variant_metrics` Parquet datasets. Their paths are fixed in the extraction
+script. Missing concordance values or incomplete valid-call counts do not remove
+a position from the mask; presence is separate from call-level evaluability.
+The same position mask is applied to the Array and WGS runs and both truth
+resources. The extractor then requires compatible records in all physical
+QUILT2 outputs and both truth resources, so the plotted exact-allele mask can be
+a subset of the twelve-run evaluator position mask.
+
+The 25 targets comprise 18 Array Group I/II samples from the 2× run and seven
+WGS samples. Reference-panel identity is retained in the Parquet for auditing,
+but it is not represented by plot colour, shape, or facets.
+
+Array and WGS targets were imputed in separate physical runs. Consequently,
+each treatment–panel condition has two emitted INFO_SCORE and HWE values. The
+18 Array FORMAT columns are selected for call-level evaluation, but site-level
+fields remain exactly as emitted by the original physical run; they are not
+recomputed after sample selection. The embedded source manifest records the
+original sample count and a hash of its complete sample list so this scope is
+auditable. The
+extractor defines the plotted `mean_info_score` as the target-count-weighted
+mean of the 18-sample Array and 7-sample WGS emissions within each panel,
+followed by an equal mean over the three panels. HWE p-values are never averaged:
+both physical emissions enter the HWE analysis as separate observations paired
+with the same 25-sample panel correctness.
+
+```{r}
+#| label: provenance
+provenance <- tibble::tibble(
+  item = c(
+    "Parquet", "Schema version", "Rows",
+    "Twelve-run Array/WGS evaluator-mask positions", "Evaluator-mask SHA-256",
+    "Evaluation-mask manifest SHA-256",
+    "Final exact-allele common loci", "Positions removed after evaluator mask",
+    "Final mask SHA-256",
+    "WGS truth minimum GQ", "WGS truth minimum DP", "GP sum tolerance (audit only)",
+    "Accuracy target", "Documented analysis compromise"
+  ),
+  value = c(
+    data_file,
+    format_metadata("extraction_schema_version"),
+    comma(reader$num_rows),
+    comma(as.numeric(format_metadata("eval_mask_position_count"))),
+    format_metadata("eval_mask_sha256"),
+    format_metadata("eval_mask_manifest_sha256"),
+    comma(as.numeric(format_metadata("common_locus_count"))),
+    comma(as.numeric(format_metadata("final_mask_attrition_from_eval"))),
+    format_metadata("mask_sha256"),
+    format_metadata("wgs_truth_min_gq"),
+    format_metadata("wgs_truth_min_dp"),
+    format_metadata("gp_sum_tolerance"),
+    format_metadata("accuracy_target"),
+    format_metadata("analysis_compromise")
+  )
+)
+kable(provenance, caption = "Embedded extraction provenance")
+
+eval_mask_sources <- jsonlite::fromJSON(format_metadata("eval_mask_manifest_json")) |>
+  as_tibble() |>
+  transmute(
+    run_id = logical_run_id,
+    treatment,
+    panel,
+    truth_source,
+    source_type = mask_input_type,
+    retained_positions = position_count,
+    artifact_sha256_prefix = substr(source_sha256, 1, 12),
+    position_sha256_prefix = substr(positions_sha256, 1, 12)
+  ) |>
+  arrange(factor(treatment, levels = treatment_levels), panel, truth_source)
+kable(
+  eval_mask_sources,
+  caption = "Six Array and six WGS evaluation artifacts used to construct the starting position mask"
+)
+
+source_population <- jsonlite::fromJSON(format_metadata("source_manifest_json")) |>
+  as_tibble() |>
+  transmute(
+    run_id = logical_run_id,
+    treatment,
+    panel,
+    target_run = truth_source,
+    original_samples = source_sample_count,
+    selected_samples = selected_sample_count,
+    sample_list_sha256_prefix = substr(source_samples_sha256, 1, 12)
+  ) |>
+  arrange(factor(treatment, levels = treatment_levels), panel, target_run)
+kable(source_population, caption = "Physical-run sample populations (12-character sample-list hash prefix shown)")
+```
+
+## Validated analysis views
+
+Only columns needed by a particular view are selected through Arrow. The full
+call table is not loaded as one local object. Overall GT accuracy reuses the
+precomputed pooled counts from the unfiltered INFO view, including loci with
+missing INFO_SCORE or incomplete calls. GP columns are not read by Quarto.
+
+```{r}
+#| label: views
+info_view <- dataset |>
+  select(
+    locus_id, chrom, treatment, mean_info_score, info_plot_eligible,
+    percent_correct_pooled, pooled_site_eligible, n_expected_pooled,
+    n_valid_pooled, n_correct_pooled
+  ) |>
+  distinct() |>
+  collect() |>
+  mutate(treatment = factor(treatment, levels = treatment_levels))
+
+hwe_view <- dataset |>
+  select(
+    locus_id, chrom, treatment, panel, truth_source, info__hwe, hwe_valid,
+    percent_correct_panel, site_cc_eligible, n_expected_panel,
+    n_valid_panel, n_correct_panel
+  ) |>
+  distinct() |>
+  collect() |>
+  mutate(treatment = factor(treatment, levels = treatment_levels))
+
+sample_lookup <- dataset |>
+  select(sample_id, array_group) |>
+  distinct() |>
+  collect() |>
+  arrange(factor(array_group, levels = c("Group I", "Group II", "WGS")), sample_id)
+
+assert_unique(info_view, c("locus_id", "treatment"), "INFO view")
+assert_unique(hwe_view, c("locus_id", "treatment", "panel", "truth_source"), "HWE view")
+assert_unique(sample_lookup, "sample_id", "Sample lookup")
+assert_true(nrow(sample_lookup) == 25L, "Expected exactly 25 samples in the Parquet.")
+assert_true(
+  identical(sort(unique(as.character(info_view$treatment))), sort(treatment_levels)),
+  "Expected both Filtered and No_filter treatments."
+)
+assert_true(all(info_view$n_expected_pooled == 75L), "n_expected_pooled must always be 75.")
+assert_true(all(hwe_view$n_expected_panel == 25L), "n_expected_panel must always be 25.")
+assert_true(
+  all(info_view$n_correct_pooled >= 0 &
+    info_view$n_correct_pooled <= info_view$n_valid_pooled &
+    info_view$n_valid_pooled <= info_view$n_expected_pooled),
+  "Pooled counts are inconsistent, including at incomplete loci."
+)
+assert_true(
+  all(is.na(info_view$percent_correct_pooled[!info_view$pooled_site_eligible])),
+  "Ineligible pooled sites must have percent_correct_pooled = NA."
+)
+assert_true(
+  all(is.na(hwe_view$percent_correct_panel[!hwe_view$site_cc_eligible])),
+  "Ineligible panel sites must have percent_correct_panel = NA."
+)
+pooled_check <- info_view |>
+  filter(pooled_site_eligible) |>
+  transmute(ok = n_valid_pooled == 75L &
+    abs(percent_correct_pooled - 100 * n_correct_pooled / 75) < 1e-10)
+panel_check <- hwe_view |>
+  filter(site_cc_eligible) |>
+  transmute(ok = n_valid_panel == 25L &
+    abs(percent_correct_panel - 100 * n_correct_panel / 25) < 1e-10)
+assert_true(all(pooled_check$ok), "Supplied pooled %CC fails its fixed-denominator invariant.")
+assert_true(all(panel_check$ok), "Supplied panel %CC fails its fixed-denominator invariant.")
+view_summary <- tibble::tibble(
+  view = c("INFO and overall GT counts", "HWE"),
+  grain = c(
+    "locus × treatment",
+    "locus × treatment × panel × physical target run"
+  ),
+  rows = c(nrow(info_view), nrow(hwe_view))
+)
+kable(view_summary, digits = 0, caption = "In-memory analysis views")
+```
+
+## `%CC` versus `INFO_SCORE`
+
+Why use this graph: `INFO_SCORE` is a site-level imputation-quality statistic,
+so the relevant validation question is whether it ranks loci from lower to
+higher observed hard-call accuracy. It is not a correctness probability; a
+1:1 line would therefore imply the wrong calibration interpretation.
+
+What it shows: each point is one eligible locus × treatment. Its y-value is the
+precomputed percentage of correct GT calls across 75 comparisons (25 targets ×
+three panels). The 0.05-wide summaries expose the broad trend while preserving
+the locus cloud. Confidence bands are chromosome-block jackknife intervals and
+therefore respect within-chromosome dependence better than ordinary locus-wise
+standard errors.
+
+```{r}
+#| label: info-prepare
+info_breaks <- c(seq(0, 0.95, by = 0.05), 1 + .Machine$double.eps)
+info_labels <- sprintf("%.2f–%.2f", head(info_breaks, -1), pmin(tail(info_breaks, -1), 1))
+
+info_plot_data <- info_view |>
+  filter(info_plot_eligible, is.finite(mean_info_score), !is.na(percent_correct_pooled)) |>
+  mutate(
+    info_bin = cut(
+      mean_info_score,
+      breaks = info_breaks,
+      labels = info_labels,
+      include.lowest = TRUE,
+      right = FALSE
+    )
+  ) |>
+  filter(!is.na(info_bin))
+
+jackknife_bin <- function(data) {
+  blocks <- unique(data$chrom)
+  full_estimate <- mean(data$percent_correct_pooled)
+  leave_one_out <- vapply(
+    blocks,
+    function(block) mean(data$percent_correct_pooled[data$chrom != block]),
+    numeric(1)
+  )
+  leave_one_out <- leave_one_out[is.finite(leave_one_out)]
+  block_count <- length(leave_one_out)
+  if (block_count >= 2L) {
+    leave_one_out_mean <- mean(leave_one_out)
+    standard_error <- sqrt((block_count - 1) / block_count *
+      sum((leave_one_out - leave_one_out_mean)^2))
+    lower <- max(0, full_estimate - 1.96 * standard_error)
+    upper <- min(100, full_estimate + 1.96 * standard_error)
+  } else {
+    standard_error <- lower <- upper <- NA_real_
+  }
+  tibble::tibble(
+    mean_info_score = mean(data$mean_info_score),
+    percent_correct = full_estimate,
+    n_loci = nrow(data),
+    n_chromosomes = length(blocks),
+    jackknife_se = standard_error,
+    lower = lower,
+    upper = upper
+  )
+}
+
+info_summary <- info_plot_data |>
+  group_by(treatment, info_bin) |>
+  group_modify(~ jackknife_bin(.x)) |>
+  ungroup()
+```
+
+```{r}
+#| label: fig-info-score
+#| fig-cap: "INFO_SCORE rank validation. Points are eligible loci; lines are 0.05-bin means and ribbons are chromosome-block jackknife 95% intervals."
+#| fig-width: 10
+#| fig-height: 5
+ggplot(info_plot_data, aes(mean_info_score, percent_correct_pooled)) +
+  geom_point(alpha = 0.12, size = 0.7, colour = "#24527A") +
+  geom_ribbon(
+    data = info_summary,
+    aes(x = mean_info_score, ymin = lower, ymax = upper),
+    inherit.aes = FALSE,
+    fill = "#E69F00",
+    alpha = 0.22
+  ) +
+  geom_line(
+    data = info_summary,
+    aes(x = mean_info_score, y = percent_correct),
+    inherit.aes = FALSE,
+    colour = "#B24C00",
+    linewidth = 0.9
+  ) +
+  geom_point(
+    data = info_summary,
+    aes(x = mean_info_score, y = percent_correct),
+    inherit.aes = FALSE,
+    colour = "#B24C00",
+    size = 1.8
+  ) +
+  facet_wrap(~ treatment, labeller = as_labeller(treatment_labels)) +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  scale_y_continuous(limits = c(0, 100), labels = label_percent(scale = 1)) +
+  labs(
+    x = "Mean QUILT2 INFO_SCORE",
+    y = "Correct GT calls across 75 comparisons (%CC)",
+    caption = "Descriptive common-locus association; no causal treatment claim and no 1:1 line."
+  ) +
+  theme_report
+```
+
+```{r}
+#| label: info-summary-table
+kable(
+  info_summary |>
+    mutate(treatment = recode(as.character(treatment), !!!treatment_labels)) |>
+    select(treatment, info_bin, mean_info_score, percent_correct, n_loci, n_chromosomes, lower, upper),
+  digits = 3,
+  caption = "INFO_SCORE-bin summaries and chromosome-block jackknife intervals"
+)
+```
+
+## Overall reported GT accuracy
+
+Why use this graph: it answers the practical question, "How accurate are the
+reported calls regardless of confidence?" Each evaluable sample × locus × panel
+GT contributes one correct or incorrect comparison within its treatment.
+
+What it shows: the percentage of evaluable GT calls matching aligned truth,
+pooled across all common-mask loci, 25 target samples, and three panels. It
+includes valid comparisons from incomplete loci and from loci with missing
+INFO_SCORE. The denominator is the total number of valid GT–truth comparisons,
+and the table also reports unevaluable comparisons. This aggregate differs from
+site-level `%CC`, which still requires all 25 or 75 calls at an individual site.
+
+Compromise: no GP threshold, confidence bin, or GP-argmax selection is applied.
+The plot cannot establish whether GP probabilities are calibrated, whether
+high-confidence calls are more accurate, or which GP cutoff should be used.
+The panels contribute repeated evaluations of the same targets, so this remains
+a descriptive summary without an independence-based significance test.
+
+```{r}
+#| label: overall-gt-summary
+# Use all precomputed pooled counts, without filtering on site eligibility,
+# INFO_SCORE, HWE, or any GP value. No genotype comparisons are performed here.
+gt_accuracy_summary <- info_view |>
+  group_by(treatment) |>
+  summarise(
+    n_loci = n_distinct(locus_id),
+    n_expected_calls = sum(n_expected_pooled),
+    n_valid_calls = sum(n_valid_pooled),
+    n_correct_calls = sum(n_correct_pooled),
+    .groups = "drop"
+  ) |>
+  mutate(
+    n_incorrect_calls = n_valid_calls - n_correct_calls,
+    n_unevaluable_calls = n_expected_calls - n_valid_calls,
+    percent_correct = if_else(
+      n_valid_calls > 0,
+      100 * n_correct_calls / n_valid_calls,
+      NA_real_
+    )
+  )
+```
+
+```{r}
+#| label: fig-overall-gt-accuracy
+#| fig-cap: "Overall reported GT correctness by treatment, regardless of GP confidence. Each point uses all valid GT–truth comparisons in the common mask."
+#| fig-width: 7
+#| fig-height: 5
+gt_accuracy_plot_data <- gt_accuracy_summary |>
+  filter(n_valid_calls > 0)
+
+ggplot(gt_accuracy_plot_data, aes(treatment, percent_correct)) +
+  geom_point(colour = "#24527A", size = 3.5) +
+  geom_text(aes(label = sprintf("%.2f%%", percent_correct)), vjust = -0.8) +
+  scale_x_discrete(limits = treatment_levels, labels = treatment_labels, drop = FALSE) +
+  scale_y_continuous(
+    limits = c(0, 100), labels = label_percent(scale = 1),
+    expand = expansion(mult = c(0.02, 0.08))
+  ) +
+  labs(
+    x = "Treatment",
+    y = "Correct reported GT calls (%)",
+    caption = "Actual valid-call denominator; no GP filtering or calibration assessment."
+  ) +
+  theme_report
+```
+
+```{r}
+#| label: overall-gt-table
+kable(
+  gt_accuracy_summary |>
+    mutate(treatment = recode(as.character(treatment), !!!treatment_labels)) |>
+    select(
+      treatment, n_loci, n_expected_calls, n_valid_calls,
+      n_correct_calls, n_incorrect_calls, n_unevaluable_calls, percent_correct
+    ),
+  digits = 2,
+  caption = "Overall GT accuracy and comparison counts, with GP ignored"
+)
+```
+
+## `%CC` versus HWE
+
+Why use this graph: the emitted HWE p-value describes departure from
+Hardy–Weinberg equilibrium at a locus. Relating `-log10(HWE)` to observed
+hard-call correctness tests whether stronger departures are associated with
+lower accuracy.
+
+What it shows: every y-value is the precomputed 25-sample panel `%CC`. HWE
+p-values are physical-run emissions and are not averaged across either panels
+or Array/WGS target runs. Panel and target-run identities remain in the data but
+are not shown aesthetically. Therefore dense regions contain repeated evidence
+from multiple emissions rather than independent biological loci, and the plot
+is descriptive rather than an ordinary locus-level significance test.
+
+```{r}
+#| label: hwe-prepare
+hwe_plot_data <- hwe_view |>
+  filter(site_cc_eligible, hwe_valid, !is.na(percent_correct_panel))
+positive_hwe <- hwe_plot_data$info__hwe[
+  is.finite(hwe_plot_data$info__hwe) & hwe_plot_data$info__hwe > 0
+]
+if (!length(positive_hwe)) stop("No positive HWE p-values are available for plotting.", call. = FALSE)
+hwe_floor <- max(.Machine$double.xmin, min(positive_hwe) / 10)
+hwe_plot_data <- hwe_plot_data |>
+  mutate(
+    hwe_censored = info__hwe == 0,
+    hwe_for_plot = if_else(hwe_censored, hwe_floor, info__hwe),
+    hwe_departure = -log10(hwe_for_plot),
+    hwe_bin_lower = floor(hwe_departure / 0.5) * 0.5
+  )
+
+hwe_summary <- hwe_plot_data |>
+  group_by(treatment, hwe_bin_lower) |>
+  summarise(
+    mean_hwe_departure = mean(hwe_departure),
+    mean_percent_correct = mean(percent_correct_panel),
+    n_emissions = n(),
+    n_loci = n_distinct(locus_id),
+    .groups = "drop"
+  )
+```
+
+```{r}
+#| label: fig-hwe
+#| fig-cap: "HWE departure versus fixed-denominator panel correctness. Lines summarise 0.5-wide -log10(p) bins."
+#| fig-width: 10
+#| fig-height: 5
+ggplot(hwe_plot_data, aes(hwe_departure, percent_correct_panel)) +
+  geom_point(aes(shape = hwe_censored), alpha = 0.10, size = 0.75, colour = "#24527A") +
+  geom_line(
+    data = hwe_summary,
+    aes(mean_hwe_departure, mean_percent_correct),
+    inherit.aes = FALSE,
+    colour = "#B24C00",
+    linewidth = 0.9
+  ) +
+  geom_point(
+    data = hwe_summary,
+    aes(mean_hwe_departure, mean_percent_correct),
+    inherit.aes = FALSE,
+    colour = "#B24C00",
+    size = 1.7
+  ) +
+  facet_wrap(~ treatment, labeller = as_labeller(treatment_labels)) +
+  scale_shape_manual(
+    values = c(`FALSE` = 16, `TRUE` = 17),
+    labels = c(`FALSE` = "Positive p-value", `TRUE` = "Reported zero (censored)"),
+    name = "HWE value"
+  ) +
+  scale_y_continuous(limits = c(0, 100), labels = label_percent(scale = 1)) +
+  labs(
+    x = expression(-log[10]("QUILT2 HWE p-value")),
+    y = "Correct GT calls among 25 targets (%CC)",
+    caption = paste0(
+      "Reported zeros are right-censored and plotted at p = ",
+      format(hwe_floor, scientific = TRUE, digits = 3),
+      ", one decade below the smallest positive emitted value."
+    )
+  ) +
+  theme_report
+```
+
+```{r}
+#| label: hwe-summary-table
+kable(
+  hwe_summary |>
+    mutate(treatment = recode(as.character(treatment), !!!treatment_labels)) |>
+    select(treatment, hwe_bin_lower, mean_hwe_departure, mean_percent_correct, n_emissions, n_loci),
+  digits = 3,
+  caption = "HWE-departure-bin summaries"
+)
+```
+
+## Reading limits
+
+- `%CC` is a hard-call metric. It answers whether the reported GT genotype is
+  exactly correct, not how close an allele dosage is.
+- Panel `%CC` is reported only for 25/25 valid target calls; pooled `%CC` only
+  for 75/75 valid panel–target comparisons. Missing calls are retained in the
+  Parquet but do not silently reduce these denominators.
+- Overall GT accuracy uses all evaluable GT–truth comparisons, including those
+  at incomplete loci; its denominator is their actual count. Unevaluable calls
+  are counted separately. GP does not affect scoring or inclusion.
+- Agreed compromise: GP confidence is ignored. No confidence bins, GP-argmax
+  comparisons, reliability curves, or calibration-gap heatmaps are produced.
+  The report cannot assess probability calibration or recommend a GP cutoff.
+- The common-locus restriction can narrow the range of each parameter and can
+  induce selection effects. The figures validate parameter behaviour within
+  this retrospective overlap; they do not isolate a causal filter parameter.
+- The starting mask is the intersection of positions present in all six Array
+  and six WGS evaluation Parquets. The final plotted mask can be smaller because
+  WGS truth and all 12 physical QUILT2 outputs must also pass exact allele and
+  uniqueness checks.
