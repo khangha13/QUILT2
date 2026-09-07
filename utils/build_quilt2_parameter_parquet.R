@@ -135,7 +135,9 @@ if (anyDuplicated(manifest$source_id)) fail("Staged manifest source_id values ar
 if (any(!manifest$treatment %in% c("Filtered", "No_filter"))) fail("Unexpected treatment")
 if (any(!manifest$panel %in% c("Liao", "NCBI", "Combined"))) fail("Unexpected panel")
 if (any(!manifest$truth_source %in% c("array", "wgs"))) fail("Unexpected truth_source")
-if (any(!manifest$input_type %in% c("vcf", "chunks"))) fail("Unexpected input_type")
+if (any(!manifest$input_type %in% c("vcf", "chromosome_vcfs"))) {
+  fail("Unexpected input_type; expected vcf or chromosome_vcfs")
+}
 if (nrow(manifest) != 12L) fail("Expected 12 staged sources; found ", nrow(manifest))
 hash_columns <- c(
   "source_samples_sha256", "source_signature_sha256", "candidate_vcf_sha256",

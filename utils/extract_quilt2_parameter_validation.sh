@@ -18,7 +18,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-CONCAT_SCRIPT="${ROOT_DIR}/modules/evaluate/concat_imputed.sh"
 R_HELPER="${SCRIPT_DIR}/build_quilt2_parameter_parquet.R"
 MASK_POSITION_HELPER="${SCRIPT_DIR}/extract_array_evaluation_positions.R"
 DEFAULT_SAMPLE_MAP="${ROOT_DIR}/analysis/quilt2_parameter_validation/sample_map.tsv"
@@ -81,8 +80,19 @@ Options:
 Run-manifest columns (tab-separated, exactly in this order):
   source_id logical_run_id treatment panel truth_source input_type input_path
 
-input_type is "vcf" for one indexed VCF/BCF or "chunks" for a QUILT2
-OUTPUT_DIR/chunks/imputed directory. Paths may contain spaces but not tabs/newlines.
+Input modes:
+  vcf              Read one existing indexed VCF/BCF directly, such as
+                   imputed.all_chroms.vcf.gz.
+  chromosome_vcfs  Read existing indexed chromosome VCFs directly from
+                   INPUT_PATH/ChrNN/imputed.ChrNN.vcf.gz.
+
+The supplied manifest uses vcf for Array and chromosome_vcfs for WGS.
+Every selected chromosome VCF and its index must already exist. Source VCFs
+are read-only; raw chunks are never rebuilt, even with --force. Only the small
+masked chromosome subsets are combined afterward for the Parquet builder.
+For an older manifest, replace WGS input_type "chunks" with "chromosome_vcfs";
+keep its input_path pointing to the run's chunks/imputed directory.
+Paths may contain spaces but not tabs/newlines.
 
 The six Array concordance Parquet paths and six WGS per_variant_metrics dataset
 paths are fixed in ARRAY_MASK_PARQUETS and WGS_MASK_PARQUETS near the top of this
@@ -152,7 +162,6 @@ done
 [[ -d "${WGS_TRUTH_DIR}" ]] || die "WGS truth directory not found: ${WGS_TRUTH_DIR}"
 [[ -f "${REFERENCE_FASTA}" ]] || die "Reference FASTA not found: ${REFERENCE_FASTA}"
 [[ -f "${REFERENCE_FASTA}.fai" ]] || die "Reference FASTA index not found: ${REFERENCE_FASTA}.fai"
-[[ -x "${CONCAT_SCRIPT}" || -f "${CONCAT_SCRIPT}" ]] || die "Missing concat helper: ${CONCAT_SCRIPT}"
 [[ -f "${R_HELPER}" ]] || die "Missing R helper: ${R_HELPER}"
 [[ -f "${MASK_POSITION_HELPER}" ]] || die "Missing mask-position helper: ${MASK_POSITION_HELPER}"
 awk -v value="${MIN_GQ}" 'BEGIN {exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value + 0 >= 0)}' \
@@ -251,7 +260,8 @@ for row in "${RUN_ROWS[@]}"; do
     [[ "${treatment}" == "Filtered" || "${treatment}" == "No_filter" ]] || die "Invalid treatment: ${treatment}"
     [[ "${panel}" == "Liao" || "${panel}" == "NCBI" || "${panel}" == "Combined" ]] || die "Invalid panel: ${panel}"
     [[ "${truth_source}" == "array" || "${truth_source}" == "wgs" ]] || die "Invalid truth_source: ${truth_source}"
-    [[ "${input_type}" == "vcf" || "${input_type}" == "chunks" ]] || die "Invalid input_type: ${input_type}"
+    [[ "${input_type}" == "vcf" || "${input_type}" == "chromosome_vcfs" ]] \
+        || die "Invalid input_type: ${input_type}; use vcf or chromosome_vcfs (raw-chunk rebuilding is not supported)"
     [[ -z "${SOURCE_ID_SEEN[${source_id}]:-}" ]] || die "Duplicate source_id: ${source_id}"
     SOURCE_ID_SEEN[${source_id}]=1
     condition_key="${treatment}|${panel}|${truth_source}"
@@ -270,7 +280,14 @@ for row in "${RUN_ROWS[@]}"; do
         [[ -f "${input_path}" ]] || die "Source VCF not found: ${input_path}"
         [[ -f "${input_path}.csi" || -f "${input_path}.tbi" ]] || die "Source VCF/BCF is not indexed: ${input_path}"
     else
-        [[ -d "${input_path}" ]] || die "Chunk directory not found: ${input_path}"
+        [[ -d "${input_path}" ]] || die "Chromosome-VCF directory not found: ${input_path}"
+        for chr in "${CHROMS[@]}"; do
+            chromosome_vcf="${input_path}/${chr}/imputed.${chr}.vcf.gz"
+            [[ -f "${chromosome_vcf}" && -s "${chromosome_vcf}" && -r "${chromosome_vcf}" ]] \
+                || die "Existing chromosome VCF is missing, empty, or unreadable: ${chromosome_vcf}; no rebuild will be attempted"
+            [[ -f "${chromosome_vcf}.csi" || -f "${chromosome_vcf}.tbi" ]] \
+                || die "Existing chromosome VCF is not indexed: ${chromosome_vcf}; no rebuild will be attempted"
+        done
     fi
 done
 for treatment in Filtered No_filter; do
@@ -340,13 +357,12 @@ for row in "${RUN_ROWS[@]}"; do
     if [[ "${input_type}" == "vcf" ]]; then
         check_samples_present "${input_path}" "${expected_samples}" "Source ${source_id}"
     else
-        probe=""
         for chr in "${CHROMS[@]}"; do
-            probe="$(find "${input_path}/${chr}" -maxdepth 1 -type f -name "quilt2.diploid.${chr}.*.vcf.gz" -print 2>/dev/null | sort | head -n 1)"
-            [[ -z "${probe}" ]] || break
+            chromosome_vcf="${input_path}/${chr}/imputed.${chr}.vcf.gz"
+            bcftools index -n "${chromosome_vcf}" >/dev/null \
+                || die "Cannot read the chromosome VCF index: ${chromosome_vcf}"
+            check_samples_present "${chromosome_vcf}" "${expected_samples}" "Source ${source_id} ${chr}"
         done
-        [[ -n "${probe}" ]] || die "No selected-chromosome chunk VCF found for ${source_id}: ${input_path}"
-        check_samples_present "${probe}" "${expected_samples}" "Source ${source_id} probe"
     fi
 done
 
@@ -550,7 +566,7 @@ printf 'wgs\t%s\t%s\t%s\t7\t%s\t%s\t%s\t%s\n' \
     "${WGS_TRUTH_CANDIDATE}" "${WGS_TRUTH_DIR}" "${WGS_SOURCE_SAMPLE_COUNT}" "${WGS_SOURCE_SAMPLES_SHA256}" \
     "${WGS_SOURCE_SHA256}" "${WGS_CANDIDATE_SHA256}" "${WGS_HEADER_SHA256}" >> "${TRUTH_MANIFEST}"
 
-log_info "Staging 12 QUILT2 physical sources"
+log_info "Extracting common-mask records from 12 QUILT2 source runs"
 source_index=0
 for row in "${RUN_ROWS[@]}"; do
     source_index=$((source_index + 1))
@@ -567,10 +583,8 @@ for row in "${RUN_ROWS[@]}"; do
         printf '%s\n' "${input_path}" > "${source_files}"
     else
         for chr in "${CHROMS[@]}"; do
-            find "${input_path}/${chr}" -maxdepth 1 -type f -name "quilt2.diploid.${chr}.*.vcf.gz" -print 2>/dev/null >> "${source_files}"
+            printf '%s\n' "${input_path}/${chr}/imputed.${chr}.vcf.gz" >> "${source_files}"
         done
-        LC_ALL=C sort -u -o "${source_files}" "${source_files}"
-        [[ -s "${source_files}" ]] || die "No selected chunk files found for ${source_id}"
     fi
 
     source_signature="$(hash_file_set "${source_files}" "${source_dir}/source_hashes.tsv")"
@@ -580,9 +594,9 @@ for row in "${RUN_ROWS[@]}"; do
     source_samples_sha256="${SAMPLE_SHA256}"
     for chr in "${CHROMS[@]}"; do
         full_chr_vcf=""
-        if [[ "${input_type}" == "chunks" ]]; then
-            concat_dir="${source_dir}/concat_${chr}"
-            full_chr_vcf="$(bash "${CONCAT_SCRIPT}" --chunks-dir "${input_path}" --chr "${chr}" --out-dir "${concat_dir}" --force)"
+        if [[ "${input_type}" == "chromosome_vcfs" ]]; then
+            full_chr_vcf="${input_path}/${chr}/imputed.${chr}.vcf.gz"
+            log_info "${source_id} ${chr}: reusing existing indexed chromosome VCF: ${full_chr_vcf}"
             sample_signature "${full_chr_vcf}" "${source_dir}/${chr}.source_samples.txt"
             if [[ "${SAMPLE_COUNT}" != "${source_sample_count}" || "${SAMPLE_SHA256}" != "${source_samples_sha256}" ]]; then
                 die "Source ${source_id} sample set differs on ${chr}"
@@ -596,12 +610,10 @@ for row in "${RUN_ROWS[@]}"; do
             | bcftools norm -f "${REFERENCE_FASTA}" -c e -Oz -o "${output_chr}"
         bcftools index -f -c "${output_chr}"
         printf '%s\n' "${output_chr}" >> "${chromosome_candidates}"
-        if [[ "${input_type}" == "chunks" ]]; then
-            rm -rf "${source_dir}/concat_${chr}"
-        fi
     done
 
     staged_vcf="${source_dir}/${source_id}.candidate.vcf.gz"
+    log_info "${source_id}: combining only the masked chromosome subsets for the Parquet builder"
     combine_vcfs "${chromosome_candidates}" "${staged_vcf}"
     check_samples_present "${staged_vcf}" "${expected_samples}" "Staged source ${source_id}"
     staged_sample_count="$(bcftools query -l "${staged_vcf}" | wc -l | tr -d ' ')"

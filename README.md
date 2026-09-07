@@ -345,10 +345,23 @@ live file readability and data contents still require the Bunya preflight.
 
 WGS truth comes from
 `/QRISdata/Q8367/WGS_Reference_Panel/NCBI_truth_set/7.Consolidated_VCF/ChrNN_consolidated.vcf.gz`.
-`input_type=chunks` uses the
-overlap-aware chunk concatenator one chromosome at a time; `input_type=vcf`
-requires an indexed VCF/BCF. Both forms retain the original QUILT2 INFO and
-FORMAT values when selecting the 18 or seven target samples.
+The WGS manifest rows use `input_type=chromosome_vcfs`: each input directory
+above supplies existing `ChrNN/imputed.ChrNN.vcf.gz` files and their `.csi` or
+`.tbi` indexes. The extractor reads these chromosome VCFs directly and never
+rebuilds raw chunks, even with `--force`. Preflight checks every selected
+chromosome file, its index, and its target sample IDs; missing, empty,
+unreadable, or unindexed inputs stop extraction rather than trigger a rebuild.
+Only the small masked chromosome subsets are combined for the Parquet builder.
+Source checksums cover the chromosome VCFs actually read, not the raw chunk
+files. Their original sample sets are checked for consistency across chromosomes.
+
+Array rows remain `input_type=vcf`, using their existing indexed genome-wide
+VCF/BCF. Both modes retain the original QUILT2 INFO and FORMAT values when
+selecting the 18 or seven target samples. If you already copied the old example
+manifest, change `input_type` from `chunks` to `chromosome_vcfs` in its six WGS
+rows; keep the directory paths unchanged. The old raw-chunk input mode is no
+longer accepted by this retrospective extractor; the main evaluation pipeline
+and its concatenation helper are unchanged.
 
 The six Array concordance Parquet paths are hard-coded in
 `ARRAY_MASK_PARQUETS`, followed immediately by `WGS_MASK_PARQUETS` for the WGS
@@ -482,6 +495,11 @@ the full 17-chromosome run must be completed on Bunya. For the pilot, also
 confirm all twelve evaluator position counts, their intersection count,
 and the reported attrition from that position mask to the final exact-allele
 mask.
+For chromosome-VCF reuse, confirm that the pilot logs the existing WGS VCF
+paths, does not rebuild chunks, and records those VCFs as the checksum sources.
+Verify that a missing VCF/index or absent target sample causes preflight to
+stop, without altering the original files. Check selected extracted INFO and
+FORMAT values against the existing chromosome VCFs.
 Verify that a position absent from any one of the twelve inputs is excluded,
 while a position present in all twelve remains eligible for masking even with
 Array `NaN` concordance or incomplete WGS `n_pairs`. Check that WGS `CHROM` is
