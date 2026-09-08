@@ -397,21 +397,34 @@ rewriting, coordinate repair, ID parsing, allele inference, or duplicate-row
 removal. Extraction requires the R packages `arrow`, `data.table`, `dplyr`,
 `digest`, and `jsonlite`.
 
-The shell intersects all twelve position lists once and applies that same mask
+The shell intersects all twelve position lists once and applies that same starting mask
 file to Array truth, WGS truth, and all 12 QUILT2 physical sources. Each source
 contributes presence at most once per position, regardless of row order or
 repeated records. Missing sample concordance, `n_pairs`, or other metrics do not
-affect membership. No separate WGS analysis mask is constructed.
+affect this starting presence mask. No separate WGS analysis mask is constructed.
 Array truth is still required downstream
 for A/B-to-ALT dosage conversion and correctness. WGS truth GT is decoded after
 exact REF/ALT matching; GQ ≥ 60 and DP ≥ 10 determine individual truth-call
-validity and do not remove positions from this mask.
+validity and therefore affect the final completeness mask.
 
-The final exact-allele mask can be smaller than this twelve-run position
-intersection: every retained record must also be a unique biallelic SNP with
-compatible alleles in all 12 physical QUILT2 outputs and WGS truth. This final
-restriction is shared by the Array and WGS rows. Both mask counts and hashes
-are recorded so this attrition is explicit.
+The final mask requires unique biallelic SNPs with compatible alleles in all
+12 physical QUILT2 outputs and WGS truth, plus valid reported GT and aligned
+truth for every selected sample in every run. This means **150/150 evaluable
+comparisons per locus**: 25 targets × three panels × two treatments. The R
+helper checks GT, WGS truth GQ/DP, and resolvable Array A/B orientation before
+expanding all INFO/FORMAT columns, then asserts the same completeness on the
+finished call table. Missing or invalid GT/truth in any one comparison excludes
+that locus globally. Incorrect but evaluable calls remain included. GP, DS,
+INFO_SCORE, HWE, and correctness do not filter this mask.
+
+The logs distinguish the twelve-run presence intersection, exact-allele
+candidates, loci removed by sample/run completeness, and `FINAL MASK: N loci`
+with 150/150 comparisons. The `bcftools norm` messages
+`Lines total/split/realigned/skipped` are per-chromosome/source candidate-record
+counts, not the final common-locus count. They can exceed the final mask size.
+Approximately 8,000 final loci is an expectation, not an enforced count. The
+stage counts and starting/final mask hashes are recorded in the output metadata
+and audit summary; `.common_loci.tsv.gz` contains only the final complete mask.
 
 Sample selection affects only the retained FORMAT columns. QUILT2 site-level
 INFO fields are preserved exactly as emitted and are not recomputed for the
@@ -453,14 +466,17 @@ quilt2_parameter_extract.parquet
 The adjacent `.sha256`, `.common_loci.tsv.gz`, and `.summary.tsv` files are
 audit sidecars. Complete candidate headers, dynamic INFO/FORMAT definitions,
 source signatures, candidate checksums, sample mapping, thresholds, all twelve
-evaluation artifacts, and both mask stages are embedded in Parquet
+evaluation artifacts, and all mask-stage counts are embedded in Parquet
 metadata. Site values are compressed with ZSTD and dictionary encoding.
 Array mask-source checksums hash the input file; WGS checksums hash a sorted
 TSV of each Parquet part's SHA-256 and absolute path. The precise checksum
 definition is embedded alongside the source paths and position hashes.
 
-The extractor writes schema `quilt2-parameter-validation-v4`, which the updated
-report requires. Its `accuracy_target=reported_gt` and `analysis_compromise`
+The extractor writes schema `quilt2-parameter-validation-v5`, which the updated
+report requires. Older v4 Parquets must be re-extracted from the existing
+outputs; QUILT2, BEAGLE, and GATK are not rerun. The v5 metadata records
+`mask_completeness=all_samples_all_runs` and 150 required comparisons per locus.
+Its `accuracy_target=reported_gt` and `analysis_compromise`
 metadata record the agreed simplification; the compromise is also included in
 the extraction log, summary sidecar, and report provenance. All emitted GP
 fields and their expanded components remain in the Parquet for future work.
@@ -489,10 +505,14 @@ Fixed-denominator hard-call metrics are defined only for 25/25 valid targets
 within a panel and 75/75 valid panel–target comparisons after pooling the three
 panels. Overall GT accuracy sums the precomputed correct-call counts and
 divides by the summed valid-call counts across all common-mask loci and three
-panels within each treatment. Valid calls at incomplete loci contribute, and
-unevaluable calls are reported separately. No GP, INFO_SCORE, or HWE selection
-is applied to this overall summary, and Quarto does not read GP columns.
-Truth validity requirements, including WGS GQ/DP, still apply.
+panels within each treatment. All retained loci are complete, so every panel
+has 25 valid comparisons, each pooled treatment has 75, and the overall
+denominator is 75 × the final locus count per treatment. The unevaluable-call
+audit count must be zero. No GP, INFO_SCORE, or HWE selection is applied to this
+overall summary, and Quarto does not read GP columns. Missing parameter values
+can still exclude points from their parameter-specific plots. Results describe
+the complete-call subset, not all imputed loci; completeness selection can
+exclude difficult loci and affect observed accuracy.
 
 The plotted INFO_SCORE is an explicitly documented target-count-weighted summary of
 the separate Array/WGS emissions, followed by an equal mean over panels. HWE
@@ -504,24 +524,29 @@ must run on Bunya. The Chr01 pilot, selected-row verification,
 manual dosage/correctness checks, comparison with the existing evaluator, and
 the full 17-chromosome run must be completed on Bunya. For the pilot, also
 confirm all twelve evaluator position counts, their intersection count,
-and the reported attrition from that position mask to the final exact-allele
-mask.
+the exact-allele candidate count, and the loci removed by completeness. The
+final mask must contain the same loci in every sample and condition, with
+exactly `150 × final_loci` Parquet rows and no unevaluable comparisons.
 For chromosome-VCF reuse, confirm that the pilot logs the existing WGS VCF
 paths, does not rebuild chunks, and records those VCFs as the checksum sources.
 Verify that a missing VCF/index or absent target sample causes preflight to
 stop, without altering the original files. Check selected extracted INFO and
 FORMAT values against the existing chromosome VCFs.
-Verify that a position absent from any one of the twelve inputs is excluded,
-while a position present in all twelve remains eligible for masking even with
-Array `NaN` concordance or incomplete WGS `n_pairs`. Check that WGS `CHROM` is
-recovered correctly from the partition directory. The Array heads supplied for
-review contain missing comparisons; they do not establish complete 25-call
-sites or whole-file uniqueness. Missing comparisons must remain explicit rather
-than being treated as incorrect or used to select positions.
-For the simplified analysis, also verify the v4 compromise metadata and that
+Verify that a position absent from any one of the twelve inputs is excluded.
+A position present in all twelve remains in the starting mask even with Array
+`NaN` concordance or incomplete WGS `n_pairs`; the final decision uses the actual
+GT/truth records, not these summary values. Check that WGS `CHROM` is recovered
+correctly from the partition directory. On Bunya, verify examples where a
+single missing or partial GT, low/missing truth GQ/DP, or unresolved Array
+orientation excludes the locus from all six conditions. A complete but
+incorrect call must not exclude it. Verify a fully evaluable locus is retained,
+with 25/25 panel counts, 75/75 pooled counts in both treatments, and 150 total
+comparisons. Also verify an empty complete mask stops with a clear error.
+For the simplified analysis, verify the v5 mask/compromise metadata and that
 overall correct/valid counts equal the sums of the per-locus pooled counts.
 Check examples with low, missing, malformed, and tied GP: valid GT–truth
 comparisons must still contribute, with correctness determined solely by GT.
+Confirm Quarto rejects a v4 Parquet and renders the v5 file without opening VCFs.
 
 ## Concordance & dosage r² (imputed vs truth)
 

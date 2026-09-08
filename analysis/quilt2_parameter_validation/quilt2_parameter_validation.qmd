@@ -40,7 +40,7 @@ dataset <- open_dataset(data_file, format = "parquet")
 
 required_columns <- c(
   "locus_id", "chrom", "pos", "run_id", "treatment", "panel", "truth_source",
-  "sample_id", "array_group", "mean_info_score", "info_plot_eligible",
+  "sample_id", "array_group", "gt_comparable", "mean_info_score", "info_plot_eligible",
   "percent_correct_pooled", "pooled_site_eligible", "n_expected_pooled",
   "n_valid_pooled", "n_correct_pooled", "info__hwe", "hwe_valid",
   "percent_correct_panel", "site_cc_eligible", "n_expected_panel",
@@ -50,14 +50,16 @@ missing_columns <- setdiff(required_columns, names(schema))
 if (length(missing_columns)) {
   stop("Parquet is missing required columns: ", paste(missing_columns, collapse = ", "), call. = FALSE)
 }
-if (!identical(parquet_metadata$extraction_schema_version, "quilt2-parameter-validation-v4")) {
-  stop("This report requires v4 output with the twelve-run Array/WGS evaluation mask.", call. = FALSE)
+if (!identical(parquet_metadata$extraction_schema_version, "quilt2-parameter-validation-v5")) {
+  stop("This report requires v5 output with 150/150 valid comparisons per locus; re-extract older Parquets.", call. = FALSE)
 }
 required_metadata <- c(
   "accuracy_target", "analysis_compromise",
   "eval_mask_position_count", "eval_mask_sha256",
   "eval_mask_manifest_sha256", "eval_mask_manifest_json",
   "common_locus_count", "final_mask_attrition_from_eval", "mask_sha256",
+  "exact_allele_locus_count", "completeness_excluded_locus_count",
+  "mask_completeness", "mask_expected_comparisons_per_locus", "final_mask_definition",
   "wgs_truth_min_gq", "wgs_truth_min_dp", "gp_sum_tolerance", "source_manifest_json"
 )
 missing_metadata <- required_metadata[!vapply(required_metadata, function(key) {
@@ -68,6 +70,10 @@ if (length(missing_metadata)) {
 }
 if (!identical(parquet_metadata$accuracy_target, "reported_gt")) {
   stop("Accuracy must refer to the reported GT call.", call. = FALSE)
+}
+if (!identical(parquet_metadata$mask_completeness, "all_samples_all_runs") ||
+    !identical(parquet_metadata$mask_expected_comparisons_per_locus, "150")) {
+  stop("The final mask must require all 25 targets across all six conditions.", call. = FALSE)
 }
 
 treatment_levels <- c("Filtered", "No_filter")
@@ -110,12 +116,15 @@ imputation behaviour at the common loci. It does not estimate a causal filter
 effect. The starting position mask is the CHROM/POS intersection of loci present
 in all six completed Array concordance Parquets and all six WGS
 `per_variant_metrics` Parquet datasets. Their paths are fixed in the extraction
-script. Missing concordance values or incomplete valid-call counts do not remove
-a position from the mask; presence is separate from call-level evaluability.
-The same position mask is applied to the Array and WGS runs and both truth
-resources. The extractor then requires compatible records in all physical
-QUILT2 outputs and both truth resources, so the plotted exact-allele mask can be
-a subset of the twelve-run evaluator position mask.
+script. This starting mask checks presence only and is applied to the Array and
+WGS runs and both truth resources. The final mask additionally requires unique,
+allele-compatible SNPs and valid reported GT plus aligned truth for every target
+in every treatment–panel condition: **150/150 comparisons per locus**. A single
+missing or invalid comparison removes that locus from all runs. WGS truth must
+pass the recorded GQ/DP thresholds, and Array A/B orientation must be resolvable.
+Incorrect but evaluable calls are retained. GP, DS, INFO_SCORE, and HWE do not
+select this mask. Approximately 8,000 final loci is an expectation, not a target
+enforced by the extraction.
 
 The 25 targets comprise 18 Array Group I/II samples from the 2× run and seven
 WGS samples. Reference-panel identity is retained in the Parquet for auditing,
@@ -141,7 +150,9 @@ provenance <- tibble::tibble(
     "Parquet", "Schema version", "Rows",
     "Twelve-run Array/WGS evaluator-mask positions", "Evaluator-mask SHA-256",
     "Evaluation-mask manifest SHA-256",
-    "Final exact-allele common loci", "Positions removed after evaluator mask",
+    "Exact-allele loci before completeness", "Loci removed by sample/run completeness",
+    "Final all-samples/all-runs common loci", "Required valid comparisons per locus",
+    "Positions removed after evaluator mask",
     "Final mask SHA-256",
     "WGS truth minimum GQ", "WGS truth minimum DP", "GP sum tolerance (audit only)",
     "Accuracy target", "Documented analysis compromise"
@@ -153,7 +164,10 @@ provenance <- tibble::tibble(
     comma(as.numeric(format_metadata("eval_mask_position_count"))),
     format_metadata("eval_mask_sha256"),
     format_metadata("eval_mask_manifest_sha256"),
+    comma(as.numeric(format_metadata("exact_allele_locus_count"))),
+    comma(as.numeric(format_metadata("completeness_excluded_locus_count"))),
     comma(as.numeric(format_metadata("common_locus_count"))),
+    format_metadata("mask_expected_comparisons_per_locus"),
     comma(as.numeric(format_metadata("final_mask_attrition_from_eval"))),
     format_metadata("mask_sha256"),
     format_metadata("wgs_truth_min_gq"),
@@ -202,8 +216,9 @@ kable(source_population, caption = "Physical-run sample populations (12-characte
 
 Only columns needed by a particular view are selected through Arrow. The full
 call table is not loaded as one local object. Overall GT accuracy reuses the
-precomputed pooled counts from the unfiltered INFO view, including loci with
-missing INFO_SCORE or incomplete calls. GP columns are not read by Quarto.
+precomputed pooled counts from the INFO view before filtering on INFO_SCORE.
+Every retained locus has complete GT–truth comparisons; missing INFO_SCORE is
+still allowed in the overall GT summary. GP columns are not read by Quarto.
 
 ```{r}
 #| label: views
@@ -233,6 +248,24 @@ sample_lookup <- dataset |>
   collect() |>
   arrange(factor(array_group, levels = c("Group I", "Group II", "WGS")), sample_id)
 
+# Validate the supplied call-validity flag without recalculating correctness or
+# loading the complete call table. This query returns at most three rows.
+call_validity <- dataset |>
+  count(gt_comparable, name = "n_calls") |>
+  collect()
+assert_true(
+  nrow(call_validity) == 1L && isTRUE(call_validity$gt_comparable[[1]]),
+  "The all-samples/all-runs Parquet contains unevaluable calls."
+)
+common_locus_count <- as.numeric(format_metadata("common_locus_count"))
+assert_true(
+  reader$num_rows == common_locus_count * 150 &&
+    nrow(info_view) == common_locus_count * 2 &&
+    n_distinct(info_view$locus_id) == common_locus_count &&
+    nrow(hwe_view) == common_locus_count * 12 &&
+    setequal(info_view$locus_id, hwe_view$locus_id),
+  "Row counts or locus sets do not match the complete 12-run mask."
+)
 assert_unique(info_view, c("locus_id", "treatment"), "INFO view")
 assert_unique(hwe_view, c("locus_id", "treatment", "panel", "truth_source"), "HWE view")
 assert_unique(sample_lookup, "sample_id", "Sample lookup")
@@ -247,15 +280,15 @@ assert_true(
   all(info_view$n_correct_pooled >= 0 &
     info_view$n_correct_pooled <= info_view$n_valid_pooled &
     info_view$n_valid_pooled <= info_view$n_expected_pooled),
-  "Pooled counts are inconsistent, including at incomplete loci."
+  "Pooled counts are inconsistent."
 )
 assert_true(
-  all(is.na(info_view$percent_correct_pooled[!info_view$pooled_site_eligible])),
-  "Ineligible pooled sites must have percent_correct_pooled = NA."
+  all(info_view$pooled_site_eligible & info_view$n_valid_pooled == 75L),
+  "Every retained locus must have 75/75 valid comparisons in each treatment."
 )
 assert_true(
-  all(is.na(hwe_view$percent_correct_panel[!hwe_view$site_cc_eligible])),
-  "Ineligible panel sites must have percent_correct_panel = NA."
+  all(hwe_view$site_cc_eligible & hwe_view$n_valid_panel == 25L),
+  "Every retained locus must have 25/25 valid comparisons in each treatment-panel condition."
 )
 pooled_check <- info_view |>
   filter(pooled_site_eligible) |>
@@ -404,10 +437,10 @@ GT contributes one correct or incorrect comparison within its treatment.
 
 What it shows: the percentage of evaluable GT calls matching aligned truth,
 pooled across all common-mask loci, 25 target samples, and three panels. It
-includes valid comparisons from incomplete loci and from loci with missing
-INFO_SCORE. The denominator is the total number of valid GT–truth comparisons,
-and the table also reports unevaluable comparisons. This aggregate differs from
-site-level `%CC`, which still requires all 25 or 75 calls at an individual site.
+includes loci with missing INFO_SCORE, but incomplete loci have already been
+removed globally by the extractor. The denominator is 75 × the number of final
+loci per treatment. The audit column for unevaluable comparisons must therefore
+be zero. Site-level `%CC` uses 25 comparisons per panel or 75 after pooling panels.
 
 Compromise: no GP threshold, confidence bin, or GP-argmax selection is applied.
 The plot cannot establish whether GP probabilities are calibrated, whether
@@ -574,19 +607,22 @@ kable(
 
 - `%CC` is a hard-call metric. It answers whether the reported GT genotype is
   exactly correct, not how close an allele dosage is.
-- Panel `%CC` is reported only for 25/25 valid target calls; pooled `%CC` only
-  for 75/75 valid panel–target comparisons. Missing calls are retained in the
-  Parquet but do not silently reduce these denominators.
-- Overall GT accuracy uses all evaluable GT–truth comparisons, including those
-  at incomplete loci; its denominator is their actual count. Unevaluable calls
-  are counted separately. GP does not affect scoring or inclusion.
+- Every retained locus has 150/150 valid comparisons across all samples and
+  conditions. Any missing GT or invalid truth removes the whole locus from every
+  run, not just from the affected sample. Panel `%CC` uses 25 comparisons and
+  pooled `%CC` uses 75 per treatment.
+- Overall GT accuracy uses every comparison at the final complete loci, including
+  incorrect calls. Its denominator is 75 × the number of loci per treatment;
+  unevaluable calls must be zero. GP does not affect scoring or inclusion.
 - Agreed compromise: GP confidence is ignored. No confidence bins, GP-argmax
   comparisons, reliability curves, or calibration-gap heatmaps are produced.
   The report cannot assess probability calibration or recommend a GP cutoff.
 - The common-locus restriction can narrow the range of each parameter and can
-  induce selection effects. The figures validate parameter behaviour within
-  this retrospective overlap; they do not isolate a causal filter parameter.
+  induce selection effects. Requiring complete calls also excludes difficult or
+  missing-call loci, so these results do not describe accuracy across all imputed
+  loci. The figures do not isolate a causal filter parameter.
 - The starting mask is the intersection of positions present in all six Array
   and six WGS evaluation Parquets. The final plotted mask can be smaller because
-  WGS truth and all 12 physical QUILT2 outputs must also pass exact allele and
-  uniqueness checks.
+  WGS truth and all 12 physical QUILT2 outputs must also pass exact allele,
+  uniqueness, and all-sample GT/truth completeness checks. Individual parameter
+  plots can further omit loci with missing or invalid INFO_SCORE or HWE.

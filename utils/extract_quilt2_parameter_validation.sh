@@ -3,6 +3,7 @@
 # Real extraction is intentionally restricted to a Bunya SLURM allocation.
 # Agreed compromise: evaluate reported GT correctness regardless of GP confidence.
 # Retain emitted GP for auditing; do not assess GP-argmax correctness or calibration.
+# Final mask: all 25 targets must have evaluable GT and truth in all six conditions.
 
 #SBATCH --job-name=quilt2_parameter_extract
 #SBATCH --account=a_qaafi_cas
@@ -126,8 +127,13 @@ The six Array concordance Parquet paths and six WGS per_variant_metrics dataset
 paths are fixed in ARRAY_MASK_PARQUETS and WGS_MASK_PARQUETS near the top of this
 script. Their twelve-way CHROM/POS intersection is applied to every Array and
 WGS input, including truth. Inputs already use standardised ChrNN names.
-Mask membership depends only on position presence, never concordance, GP, or
-the number of valid calls. WGS CHROM is read from its Hive partition directories.
+This starting mask depends only on position presence. WGS CHROM is read from
+its Hive partition directories. After staging, the R helper retains only unique
+allele-compatible SNPs with valid GT and aligned truth for all 25 targets in
+all six treatment-panel conditions (150/150 comparisons per locus). WGS truth
+GQ/DP thresholds and unambiguous Array A/B alignment still apply. Incorrect GT
+calls remain eligible; GP, DS, INFO_SCORE, and HWE do not filter the final mask.
+Approximately 8,000 final loci is an expectation, not an enforced count.
 
 Analysis compromise: assess reported GT accuracy regardless of GP confidence.
 There are no GP bins, GP-argmax comparisons, or probability-calibration plots.
@@ -455,7 +461,7 @@ candidate_hashes() {
     HEADER_SHA256="$(bcftools view -h "${candidate}" | sha256sum | awk '{print $1}')"
 }
 
-log_info "Building the common position mask from six Array and six WGS evaluations"
+log_info "Building the starting presence mask from six Array and six WGS evaluations"
 EVAL_MASK_DIR="${STAGE_DIR}/evaluation_mask"
 mkdir -p "${EVAL_MASK_DIR}"
 STAGED_EVAL_MASK_MANIFEST="${EVAL_MASK_DIR}/staged_evaluation_masks.tsv"
@@ -504,12 +510,14 @@ awk -F'\t' -v OFS='\t' '
 ' "${EVAL_MASK_POSITION_FILES[@]}" > "${POSITIONS_UNSORTED}"
 LC_ALL=C sort -k1,1 -k2,2n "${POSITIONS_UNSORTED}" > "${POSITIONS_FILE}"
 EVAL_MASK_POSITION_COUNT="$(wc -l < "${POSITIONS_FILE}" | tr -d ' ')"
-log_info "Common position mask written: ${POSITIONS_FILE}"
-log_info "Loci available in all 12 runs (6 Array + 6 WGS), before exact-allele checks: ${EVAL_MASK_POSITION_COUNT}"
+log_info "Starting presence mask written: ${POSITIONS_FILE}"
+log_info "Positions present in all 12 runs (6 Array + 6 WGS), before allele and sample-completeness checks: ${EVAL_MASK_POSITION_COUNT}"
 [[ -s "${POSITIONS_FILE}" ]] || die "No positions are shared by all six Array and six WGS evaluator artifacts"
 EVAL_MASK_SHA256="$(sha256_file "${POSITIONS_FILE}")"
 log_info "Position-mask SHA-256: ${EVAL_MASK_SHA256}"
 log_info "Applying this same position mask to Array truth, WGS truth, and all 12 QUILT2 sources"
+log_info "Candidate staging follows: bcftools 'Lines total/split/realigned/skipped' counts are per chromosome/source, not final mask counts"
+log_info "The R helper will report the final mask after requiring 150/150 valid GT-truth comparisons per locus"
 
 log_info "Staging Array truth at the twelve-run evaluator positions"
 ARRAY_TRUTH_DIR="${STAGE_DIR}/truth_array"
@@ -542,6 +550,7 @@ WGS_SOURCE_SAMPLES_SHA256=""
 for chr in "${CHROMS[@]}"; do
     input="${WGS_TRUTH_FILES[${chr}]}"
     output_chr="${WGS_TRUTH_STAGE}/${chr}.candidate.vcf.gz"
+    log_info "WGS truth ${chr}: normalising candidate records (not the final completeness mask)"
     bcftools view --no-update -r "${chr}" -S "${WGS_SAMPLES}" -m2 -M2 -v snps \
         -T "${POSITIONS_FILE}" -Ou "${input}" \
         | bcftools norm -f "${REFERENCE_FASTA}" -c e -Oz -o "${output_chr}"
@@ -613,6 +622,7 @@ for row in "${RUN_ROWS[@]}"; do
             full_chr_vcf="${input_path}"
         fi
         output_chr="${source_dir}/${chr}.candidate.vcf.gz"
+        log_info "${source_id} ${chr}: normalising candidate records (not the final completeness mask)"
         bcftools view --no-update -r "${chr}" -S "${expected_samples}" -m2 -M2 -v snps \
             -T "${POSITIONS_FILE}" -Ou "${full_chr_vcf}" \
             | bcftools norm -f "${REFERENCE_FASTA}" -c e -Oz -o "${output_chr}"
@@ -634,7 +644,7 @@ for row in "${RUN_ROWS[@]}"; do
         "${source_samples_sha256}" "${source_signature}" "${CANDIDATE_SHA256}" "${HEADER_SHA256}" >> "${STAGED_MANIFEST}"
 done
 
-log_info "Building aligned call table, correctness metrics, and common mask"
+log_info "Building the final all-samples/all-runs mask, aligned call table, and correctness metrics"
 log_info "Analysis compromise: reported GT correctness only, regardless of GP; probability calibration is not assessed"
 Rscript "${R_HELPER}" \
     --staged-manifest "${STAGED_MANIFEST}" \
@@ -654,6 +664,9 @@ Rscript "${R_HELPER}" \
 [[ -s "${PARTIAL_PARQUET}" ]] || die "R helper did not create a Parquet file"
 [[ -s "${PARTIAL_MASK}" ]] || die "R helper did not create the mask audit table"
 [[ -s "${PARTIAL_SUMMARY}" ]] || die "R helper did not create the summary audit table"
+FINAL_MASK_LOCUS_COUNT="$(awk -F'\t' '$1 == "common_loci" {print $2}' "${PARTIAL_SUMMARY}")"
+[[ "${FINAL_MASK_LOCUS_COUNT}" =~ ^[1-9][0-9]*$ ]] || die "R helper did not report a positive final-mask locus count"
+log_info "FINAL MASK: ${FINAL_MASK_LOCUS_COUNT} loci evaluable in all 25 samples across all six conditions (150/150 comparisons per locus)"
 mv -f "${PARTIAL_PARQUET}" "${OUTPUT}"
 mv -f "${PARTIAL_MASK}" "${MASK_OUTPUT}"
 mv -f "${PARTIAL_SUMMARY}" "${SUMMARY_OUTPUT}"

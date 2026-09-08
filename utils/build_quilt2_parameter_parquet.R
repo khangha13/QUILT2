@@ -1,6 +1,7 @@
 #!/usr/bin/env Rscript
 # Agreed compromise: score reported GT against truth regardless of GP confidence.
 # GP is retained as emitted data; no GP-argmax correctness or calibration is derived.
+# Final loci require evaluable GT-truth comparisons for all 25 targets in all six conditions.
 
 suppressPackageStartupMessages({
   library(arrow)
@@ -13,7 +14,7 @@ analysis_compromise <- paste(
   "Only reported GT correctness is evaluated, regardless of GP confidence.",
   "GP bins, GP-argmax correctness, and probability calibration are not assessed.",
   "Missing, malformed, or tied GP does not exclude an otherwise evaluable GT call.",
-  "Truth validity requirements still apply."
+  "The final mask requires valid aligned truth and reported GT for every target in every run."
 )
 
 parse_args <- function(args) {
@@ -482,7 +483,7 @@ for (source_id in manifest[truth_source == "array", source_id]) {
   }
 }
 
-cat("Constructing the final exact-allele mask within the twelve-run evaluator mask\n")
+cat("Constructing the exact-allele candidate mask within the twelve-run evaluator mask\n")
 exact_key_sets <- lapply(run_vcfs, function(x) x$records$locus_id)
 exact_key_sets[["wgs_truth"]] <- wgs_truth$records$locus_id
 common_keys <- Reduce(intersect, exact_key_sets)
@@ -503,9 +504,8 @@ common_mask[, chromosome_number := suppressWarnings(as.integer(sub("^Chr", "", c
 setorder(common_mask, chromosome_number, pos, ref, alt)
 common_mask[, chromosome_number := NULL]
 common_keys <- common_mask$locus_id
-mask_payload <- paste0(paste(common_keys, collapse = "\n"), "\n")
-mask_sha256 <- digest::digest(mask_payload, algo = "sha256", serialize = FALSE)
-fwrite(common_mask, opts$mask_out, sep = "\t", quote = FALSE)
+exact_allele_locus_count <- nrow(common_mask)
+cat("Exact-allele candidate loci before sample completeness: ", exact_allele_locus_count, "\n", sep = "")
 
 extract_format_tag <- function(format_keys, sample_values, tag) {
   result <- rep(NA_character_, length(sample_values))
@@ -619,6 +619,49 @@ gt_alt_dosage <- function(gt) {
 nucleotide_group <- function(base) {
   fifelse(base %chin% c("A", "T"), "A", fifelse(base %chin% c("C", "G"), "B", NA_character_))
 }
+
+# Check the wide VCF records before expanding all INFO/FORMAT fields. Do not
+# use correctness, GP, DS, INFO_SCORE, HWE, or evaluator n_pairs for selection.
+# These rules mirror the gt_valid/truth_valid checks on the final call table.
+complete_genotype_keys <- function(vcf, require_wgs_quality = FALSE) {
+  records <- vcf$records[position_id %chin% common_mask$position_id]
+  complete <- rep(TRUE, nrow(records))
+  for (sample_id in vcf$samples) {
+    sample_values <- records[[sample_id]]
+    valid <- !is.na(gt_alt_dosage(extract_format_tag(records$format_keys, sample_values, "GT")))
+    if (require_wgs_quality) {
+      gq <- suppressWarnings(as.numeric(extract_format_tag(records$format_keys, sample_values, "GQ")))
+      dp <- suppressWarnings(as.numeric(extract_format_tag(records$format_keys, sample_values, "DP")))
+      valid <- valid & !is.na(gq) & !is.na(dp) & gq >= opts$min_gq & dp >= opts$min_dp
+    }
+    complete <- complete & valid
+  }
+  records[complete, .(locus_id, position_id)]
+}
+
+cat("Requiring valid GT and aligned truth for all 25 samples across all six conditions (150 comparisons per locus)\n")
+complete_keys <- common_keys
+for (source_id in names(run_vcfs)) {
+  complete_keys <- intersect(complete_keys, complete_genotype_keys(run_vcfs[[source_id]])$locus_id)
+}
+complete_keys <- intersect(
+  complete_keys,
+  complete_genotype_keys(wgs_truth, require_wgs_quality = TRUE)$locus_id
+)
+complete_array_positions <- complete_genotype_keys(array_truth)$position_id
+# Array A/B-to-ALT alignment is unresolved for A/T and C/G allele pairs.
+common_mask <- common_mask[
+  locus_id %chin% complete_keys & position_id %chin% complete_array_positions &
+    nucleotide_group(ref) != nucleotide_group(alt)
+]
+completeness_excluded_locus_count <- exact_allele_locus_count - nrow(common_mask)
+cat("Loci excluded by all-samples/all-runs completeness: ", completeness_excluded_locus_count, "\n", sep = "")
+cat("Final all-samples/all-runs mask loci (150/150 valid comparisons): ", nrow(common_mask), "\n", sep = "")
+if (!nrow(common_mask)) fail("No loci have valid GT and aligned truth for every sample in every run")
+common_keys <- common_mask$locus_id
+mask_payload <- paste0(paste(common_keys, collapse = "\n"), "\n")
+mask_sha256 <- digest::digest(mask_payload, algo = "sha256", serialize = FALSE)
+fwrite(common_mask, opts$mask_out, sep = "\t", quote = FALSE)
 
 make_truth_long <- function(vcf, truth_source, expected_samples) {
   records <- vcf$records
@@ -801,6 +844,15 @@ calls[, gt_correct := fifelse(
   imputed_gt_dosage == truth_dosage_aligned,
   NA
 )]
+complete_call_counts <- calls[, .(
+  n_calls = .N,
+  n_valid = sum(gt_comparable)
+), by = locus_id]
+if (anyNA(complete_call_counts) ||
+    any(complete_call_counts$n_calls != 150L | complete_call_counts$n_valid != 150L) ||
+    anyDuplicated(calls, by = c("locus_id", "treatment", "panel", "sample_id"))) {
+  fail("Final mask must contain exactly 150 distinct valid GT-truth comparisons per locus")
+}
 
 # Preserve GP components and vector validity for future audits. These fields never
 # select calls, replace GT, or weight correctness. Tied probabilities are permitted.
@@ -924,7 +976,7 @@ calls[, `:=`(
   eval_mask_position_count = nrow(eval_mask),
   eval_mask_sha256 = eval_mask_sha256,
   mask_sha256 = mask_sha256,
-  extraction_schema_version = "quilt2-parameter-validation-v4"
+  extraction_schema_version = "quilt2-parameter-validation-v5"
 )]
 calls[, chromosome_number := suppressWarnings(as.integer(sub("^Chr", "", chrom)))]
 setorder(calls, chromosome_number, pos, treatment, panel, truth_source, sample_id)
@@ -944,7 +996,7 @@ field_dictionary <- rbindlist(c(
 ), fill = TRUE)
 
 metadata <- list(
-  extraction_schema_version = "quilt2-parameter-validation-v4",
+  extraction_schema_version = "quilt2-parameter-validation-v5",
   created_utc = format(Sys.time(), tz = "UTC", usetz = TRUE),
   accuracy_target = "reported_gt",
   analysis_compromise = analysis_compromise,
@@ -963,6 +1015,17 @@ metadata <- list(
     "positions_sha256 hashes the selected-chromosome coordinate TSV."
   ),
   common_locus_count = as.character(nrow(common_mask)),
+  exact_allele_locus_count = as.character(exact_allele_locus_count),
+  completeness_excluded_locus_count = as.character(completeness_excluded_locus_count),
+  mask_completeness = "all_samples_all_runs",
+  mask_expected_comparisons_per_locus = "150",
+  final_mask_definition = paste(
+    "Unique allele-compatible SNPs within the twelve-run position intersection,",
+    "with valid reported GT in every physical source and valid aligned truth for all",
+    "18 Array and seven WGS samples: 150 comparisons across six conditions per locus.",
+    "WGS truth GQ/DP thresholds and unambiguous Array A/B alignment are required.",
+    "Correctness, GP, DS, INFO_SCORE, and HWE do not determine mask membership."
+  ),
   final_mask_attrition_from_eval = as.character(nrow(eval_mask) - nrow(common_mask)),
   expected_call_rows = as.character(nrow(common_mask) * 6L * 25L),
   mask_sha256 = mask_sha256,
@@ -1023,16 +1086,22 @@ if (written_reader$num_rows != nrow(calls)) {
 summary <- data.table(
   metric = c(
     "schema_version", "eval_mask_positions", "eval_mask_sha256",
-    "common_loci", "final_mask_attrition_from_eval", "logical_conditions",
+    "exact_allele_loci", "completeness_excluded_loci", "common_loci",
+    "mask_completeness", "mask_expected_comparisons_per_locus",
+    "final_mask_attrition_from_eval", "logical_conditions",
     "physical_sources", "samples", "array_samples", "wgs_samples", "rows", "mask_sha256",
     "emitted_info_columns", "emitted_format_columns", "site_cc_eligible_rows",
     "pooled_site_eligible_rows", "gt_comparable_calls", "accuracy_target", "analysis_compromise"
   ),
   value = c(
-    "quilt2-parameter-validation-v4",
+    "quilt2-parameter-validation-v5",
     nrow(eval_mask),
     eval_mask_sha256,
+    exact_allele_locus_count,
+    completeness_excluded_locus_count,
     nrow(common_mask),
+    "all_samples_all_runs",
+    150L,
     nrow(eval_mask) - nrow(common_mask),
     6L,
     nrow(manifest),
@@ -1054,5 +1123,5 @@ fwrite(summary, opts$summary_out, sep = "\t", quote = FALSE)
 
 cat("Created: ", opts$output, "\n", sep = "")
 cat("Twelve-run Array/WGS evaluator mask positions: ", nrow(eval_mask), "\n", sep = "")
-cat("Common loci: ", nrow(common_mask), "\n", sep = "")
+cat("Final all-samples/all-runs mask loci (150/150 valid comparisons): ", nrow(common_mask), "\n", sep = "")
 cat("Call rows: ", nrow(calls), "\n", sep = "")

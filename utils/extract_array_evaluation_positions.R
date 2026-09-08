@@ -1,6 +1,7 @@
 #!/usr/bin/env Rscript
 # Analysis compromise: downstream evaluation scores reported GT regardless of GP.
-# This presence-based position mask never conditions on GP or call correctness.
+# This starting presence mask never conditions on GP or call correctness.
+# The Parquet builder applies all-samples/all-runs GT/truth completeness afterward.
 
 suppressPackageStartupMessages({
   library(arrow)
@@ -53,7 +54,8 @@ if (!file.exists(opts$input)) fail("Parquet input not found: ", opts$input)
 selected <- strsplit(opts$chromosomes, ",", fixed = TRUE)[[1]]
 
 # Both evaluators supply standardised CHROM/POS; no ID parsing, allele inference,
-# chromosome rewriting, coordinate repair, or call-validity selection is needed.
+# chromosome rewriting or coordinate repair is needed. This helper selects
+# coordinates only; the builder checks call validity in the staged VCFs.
 # WGS CHROM lives in Hive directory names (CHROM=ChrNN), not in each part file.
 # Arrow projects only coordinates and filters chromosomes before collecting.
 positions <- open_dataset(opts$input, format = "parquet", partitioning = hive_partition()) |>
