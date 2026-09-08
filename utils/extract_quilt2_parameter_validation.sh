@@ -20,7 +20,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 R_HELPER="${SCRIPT_DIR}/build_quilt2_parameter_parquet.R"
 MASK_POSITION_HELPER="${SCRIPT_DIR}/extract_array_evaluation_positions.R"
-DEFAULT_SAMPLE_MAP="${ROOT_DIR}/analysis/quilt2_parameter_validation/sample_map.tsv"
+
+# Hard-coded Bunya configuration: no command-line arguments are required.
+# The bundled manifest and sample map are resolved relative to this script.
+# ARRAY_TRUTH and its index are listed in scratch_structure.txt; verify on Bunya.
+# OUTPUT is relative to the directory from which bash is launched, not SCRIPT_DIR.
+# Existing command-line options can override these declarations for a pilot run.
+declare RUN_MANIFEST="${ROOT_DIR}/analysis/quilt2_parameter_validation/run_manifest.example.tsv"
+declare ARRAY_TRUTH="/scratch/project_mnt/S0218/downsampling/truth_array.vcf.gz"
+declare WGS_TRUTH_DIR="/QRISdata/Q8367/WGS_Reference_Panel/NCBI_truth_set/7.Consolidated_VCF"
+declare REFERENCE_FASTA="/QRISdata/Q8367/Reference_Genome/GDDH13_1-1_formatted.fasta"
+declare SAMPLE_MAP="${ROOT_DIR}/analysis/quilt2_parameter_validation/sample_map.tsv"
+declare OUTPUT="./quilt2_parameter_validation/quilt2_parameter_extract.parquet"
+declare CHR_ARG=""  # Empty means all chromosomes, Chr01-Chr17.
+declare MIN_GQ="60"
+declare MIN_DP="10"
+declare GP_SUM_TOLERANCE="0.001"
+declare DRY_RUN=false
+declare FORCE=false
+declare CONDA_ENV="${CONDA_ENV:-myenv_py310}"
+declare MINIFORGE_MODULE="${MINIFORGE_MODULE:-miniforge/25.3.0-3}"
+declare BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}"
 
 # Completed, standardised Array Group I/II 2x evaluations, keyed by treatment|panel.
 # The Filtered Liao run uses the legacy dot-separated Parquet filename.
@@ -53,13 +73,21 @@ usage() {
     cat <<'EOF'
 Usage: extract_quilt2_parameter_validation.sh [options]
 
-Required:
-  --run-manifest FILE    Twelve-row manifest: Array and WGS physical inputs for
-                         each Filtered/No_filter x Liao/NCBI/Combined condition.
-  --array-truth FILE     Array truth VCF/BCF containing Group I/II samples.
-  --output FILE          Final .parquet path.
+No arguments are required. Edit the hard-coded configuration near the top of
+the script, or supply optional overrides below. Real extraction requires an
+existing Bunya SLURM allocation; this script does not submit itself.
 
 Options:
+  --run-manifest FILE    Twelve-row manifest: Array and WGS physical inputs for
+                         each Filtered/No_filter x Liao/NCBI/Combined condition.
+                         Default: bundled run_manifest.example.tsv.
+  --array-truth FILE     Array truth VCF/BCF containing Group I/II samples.
+                         Default: /scratch/project_mnt/S0218/downsampling/
+                                  truth_array.vcf.gz
+  --output FILE          Final .parquet path.
+                         Default: ./quilt2_parameter_validation/
+                                  quilt2_parameter_extract.parquet
+                         Its directory is created after preflight passes.
   --wgs-truth-dir DIR    Directory of Chr*_consolidated.vcf.gz truth files.
                          Default: /QRISdata/Q8367/WGS_Reference_Panel/
                                   NCBI_truth_set/7.Consolidated_VCF
@@ -114,19 +142,6 @@ The command writes one Quarto input plus audit-only sidecars:
 EOF
 }
 
-RUN_MANIFEST=""
-ARRAY_TRUTH=""
-WGS_TRUTH_DIR="/QRISdata/Q8367/WGS_Reference_Panel/NCBI_truth_set/7.Consolidated_VCF"
-REFERENCE_FASTA="/QRISdata/Q8367/Reference_Genome/GDDH13_1-1_formatted.fasta"
-SAMPLE_MAP="${DEFAULT_SAMPLE_MAP}"
-OUTPUT=""
-CHR_ARG=""
-MIN_GQ="60"
-MIN_DP="10"
-GP_SUM_TOLERANCE="0.001"
-DRY_RUN=false
-FORCE=false
-
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --run-manifest|--array-truth|--wgs-truth-dir|--reference-fasta|--sample-map|--output|--chr|--min-gq|--min-dp|--gp-sum-tolerance)
@@ -152,9 +167,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -n "${RUN_MANIFEST}" ]] || { usage; die "--run-manifest is required"; }
-[[ -n "${ARRAY_TRUTH}" ]] || { usage; die "--array-truth is required"; }
-[[ -n "${OUTPUT}" ]] || { usage; die "--output is required"; }
 [[ "${OUTPUT}" == *.parquet ]] || die "--output must end in .parquet"
 [[ -f "${RUN_MANIFEST}" ]] || die "Run manifest not found: ${RUN_MANIFEST}"
 [[ -f "${SAMPLE_MAP}" ]] || die "Sample map not found: ${SAMPLE_MAP}"
@@ -175,10 +187,6 @@ if [[ "${DRY_RUN}" != "true" ]]; then
     [[ "$(uname -s)" == "Linux" ]] || die "Real extraction is Bunya/Linux-only; use --dry-run for local preflight"
     [[ -n "${SLURM_JOB_ID:-}" ]] || die "Real extraction requires a Bunya SLURM allocation (SLURM_JOB_ID is unset)"
 fi
-
-CONDA_ENV="${CONDA_ENV:-myenv_py310}"
-MINIFORGE_MODULE="${MINIFORGE_MODULE:-miniforge/25.3.0-3}"
-BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}"
 
 setup_tools() {
     if command -v module >/dev/null 2>&1; then

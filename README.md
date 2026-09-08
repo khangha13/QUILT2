@@ -309,12 +309,19 @@ parameter-calibration objective: the report cannot assess GP calibration,
 over/under-confidence, or the performance of a GP cutoff. INFO_SCORE and HWE
 remain descriptive associations with reported GT correctness.
 
-Copy the supplied run manifest before running:
+The shell declares its default inputs, output, thresholds, and environment
+settings near the top of `utils/extract_quilt2_parameter_validation.sh`.
+No command-line arguments are required. It automatically reads the bundled
+`analysis/quilt2_parameter_validation/run_manifest.example.tsv` and
+`sample_map.tsv` relative to the script's repository, so no manifest copy is
+needed. Existing flags remain optional overrides.
 
-```bash
-cp analysis/quilt2_parameter_validation/run_manifest.example.tsv \
-  analysis/quilt2_parameter_validation/run_manifest.bunya.tsv
-```
+The default output is
+`./quilt2_parameter_validation/quilt2_parameter_extract.parquet`, relative to
+the directory where the command is launched, not the script's directory.
+The output directory is created after preflight passes; `--dry-run` does not
+create it. Real extraction still requires an existing Bunya SLURM allocation;
+the script does not submit itself.
 
 The supplied paths follow the updated `scratch_structure.txt`, rooted at
 `/scratch/project_mnt/S0218` as specified for the Array inputs. Verify their
@@ -343,6 +350,10 @@ directories match the example manifest above. Each ends in
 `CHROM=ChrNN/part-000.parquet` partitions. These are tree-level checks;
 live file readability and data contents still require the Bunya preflight.
 
+Array truth defaults to
+`/scratch/project_mnt/S0218/downsampling/truth_array.vcf.gz`, listed with its
+index in the supplied scratch tree and consistent with the existing Array
+evaluation commands. Preflight must still verify its live sample IDs on Bunya.
 WGS truth comes from
 `/QRISdata/Q8367/WGS_Reference_Panel/NCBI_truth_set/7.Consolidated_VCF/ChrNN_consolidated.vcf.gz`.
 The WGS manifest rows use `input_type=chromosome_vcfs`: each input directory
@@ -407,31 +418,31 @@ INFO fields are preserved exactly as emitted and are not recomputed for the
 selected subset. The source's original sample count and complete sample-list
 hash are embedded so this retrospective scope remains auditable.
 
-Run a header/sample/dependency preflight without writing data:
+From the QUILT2 repository directory on Bunya, run a header/sample/dependency
+preflight without writing data (an allocation is not required for preflight):
+
+```bash
+bash utils/extract_quilt2_parameter_validation.sh --dry-run
+```
+
+Inside a Bunya SLURM allocation, run the Chr01 pilot with a separate output:
 
 ```bash
 bash utils/extract_quilt2_parameter_validation.sh \
-  --run-manifest analysis/quilt2_parameter_validation/run_manifest.bunya.tsv \
-  --array-truth /path/to/array_truth.vcf.gz \
-  --output /path/to/quilt2_parameter_extract.parquet \
-  --dry-run
-```
-
-Run the Chr01 pilot through Slurm:
-
-```bash
-sbatch utils/extract_quilt2_parameter_validation.sh \
-  --run-manifest analysis/quilt2_parameter_validation/run_manifest.bunya.tsv \
-  --array-truth /path/to/array_truth.vcf.gz \
-  --output /path/to/quilt2_parameter_extract.Chr01.parquet \
+  --output ./quilt2_parameter_validation/quilt2_parameter_extract.Chr01.parquet \
   --chr Chr01
 ```
 
-After pilot acceptance, omit `--chr` for Chr01–Chr17. The script defaults to the
-repository's Bunya reference FASTA and WGS truth directory; override them with
-`--reference-fasta` and `--wgs-truth-dir` if those datasets move. Existing final
-outputs are preserved unless `--force` is supplied, and even then replacement
-occurs only after the new extraction completes.
+After pilot acceptance, run all Chr01–Chr17 with the declared defaults, still
+inside a Bunya SLURM allocation:
+
+```bash
+bash utils/extract_quilt2_parameter_validation.sh
+```
+
+Edit the declarations or use the existing path options if an input moves.
+Existing final outputs are preserved unless `--force` is supplied, and even
+then replacement occurs only after the new extraction completes.
 
 The primary output is the only data input read by Quarto:
 
