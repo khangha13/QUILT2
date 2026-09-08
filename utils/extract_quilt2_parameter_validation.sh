@@ -39,7 +39,7 @@ declare GP_SUM_TOLERANCE="0.001"
 declare DRY_RUN=false
 declare FORCE=false
 declare CONDA_ENV="${CONDA_ENV:-myenv_py310}"
-declare MINIFORGE_MODULE="${MINIFORGE_MODULE:-miniforge/25.3.0-3}"
+declare MINIFORGE_MODULE="${MINIFORGE_MODULE:-miniforge/26.1.0-0}"
 declare BCFTOOLS_MODULE="${BCFTOOLS_MODULE:-bcftools/1.18-gcc-12.3.0}"
 
 # Completed, standardised Array Group I/II 2x evaluations, keyed by treatment|panel.
