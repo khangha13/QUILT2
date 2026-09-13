@@ -1,0 +1,37 @@
+---
+title: "QUILT2 long-format table"
+format: html
+params:
+  data_file: "quilt2_parameter_extract.parquet"
+---
+
+```{r}
+library(arrow)
+library(tidyr)
+
+# Read only the identifiers, existing accuracy metrics, and parameters needed.
+parameter_columns <- c("mean_info_score", "info__hwe")
+wide_table <- read_parquet(
+  params$data_file,
+  col_select = all_of(c(
+    "locus_id", "chrom", "pos", "ref", "alt", "run_id", "treatment", "panel",
+    "sample_id", "truth_source", "array_group", "gt_correct",
+    "percent_correct_panel", "percent_correct_pooled", parameter_columns
+  ))
+)
+
+long_table <- pivot_longer(
+  wide_table,
+  cols = all_of(parameter_columns),
+  names_to = "parameter",
+  values_to = "value"
+)
+
+# Preview only; long_table contains all loaded rows, including missing values.
+head(long_table, 20)
+```
+
+`long_table` has one row per locus × treatment × panel × sample × parameter.
+Nothing is recalculated. For INFO_SCORE use `percent_correct_pooled`; for HWE
+use `percent_correct_panel`. Site-level values repeat across samples, so these
+rows are not independent locus observations. GP is not analysed.

@@ -14,7 +14,7 @@ SLURM-array wrapper around QUILT2 imputation for apple data. Mirrors the Step1C 
 - `modules/evaluate/concat_imputed.sh` – stitches per-chunk imputed VCFs into per-chromosome/genome-wide VCFs.
 - `modules/evaluate/dosage_r2.sh` + `dosage_r2.R` – array-truth GT-to-GT evaluation.
 - `modules/evaluate/dosage_r2_wgs.sh` + `dosage_r2_wgs.R` – exact-allele WGS-truth GT-to-GT evaluation.
-- `utils/extract_quilt2_parameter_validation.sh` – Bunya-only retrospective extraction using the intersection of six Array and six WGS evaluations as the starting mask, with reported GT correctness regardless of GP confidence and all emitted QUILT2 fields in one Parquet.
+- `utils/extract_quilt2_parameter_validation.sh` – Bunya-only retrospective extraction using the intersection of six Array and six WGS evaluations as the starting mask. Exports the audited locus/call Parquets, with reported GT correctness regardless of GP confidence, retained GP/maxGP, and omitted HD.
 - `utils/extract_array_evaluation_positions.R` – focused Arrow helper that reads `CHROM`/`POS` from an Array `concordance.parquet` file or a WGS `per_variant_metrics` Parquet dataset.
 - `analysis/quilt2_parameter_validation/quilt2_parameter_validation.qmd` – one-input Quarto report for overall GT accuracy, INFO_SCORE rank validation, and HWE association plots; probability calibration is not assessed.
 - `quilt2_pipeline.legacy.sh` – pre-array monolithic script (kept only for rollback).
@@ -316,9 +316,11 @@ No command-line arguments are required. It automatically reads the bundled
 `sample_map.tsv` relative to the script's repository, so no manifest copy is
 needed. Existing flags remain optional overrides.
 
-The default output is
-`./quilt2_parameter_validation/quilt2_parameter_extract.parquet`, relative to
+The default output directory is `./quilt2_parameter_validation`, relative to
 the directory where the command is launched, not the script's directory.
+It contains `quilt2_locus_parameters.parquet` and `quilt2_sample_calls.parquet`.
+Use `--output-dir DIR` to change the destination; the former single-file
+`--output FILE` option is no longer accepted.
 The output directory is created after preflight passes; `--dry-run` does not
 create it. Real extraction still requires an existing Bunya SLURM allocation;
 the script does not submit itself.
@@ -367,7 +369,7 @@ Source checksums cover the chromosome VCFs actually read, not the raw chunk
 files. Their original sample sets are checked for consistency across chromosomes.
 
 Array rows remain `input_type=vcf`, using their existing indexed genome-wide
-VCF/BCF. Both modes retain the original QUILT2 INFO and FORMAT values when
+VCF/BCF. Both modes preserve original QUILT2 INFO and retained FORMAT values when
 selecting the 18 or seven target samples. If you already copied the old example
 manifest, change `input_type` from `chunks` to `chromosome_vcfs` in its six WGS
 rows; keep the directory paths unchanged. The old raw-chunk input mode is no
@@ -442,7 +444,7 @@ Inside a Bunya SLURM allocation, run the Chr01 pilot with a separate output:
 
 ```bash
 bash utils/extract_quilt2_parameter_validation.sh \
-  --output ./quilt2_parameter_validation/quilt2_parameter_extract.Chr01.parquet \
+  --output-dir ./quilt2_parameter_validation_Chr01 \
   --chr Chr01
 ```
 
@@ -457,44 +459,112 @@ Edit the declarations or use the existing path options if an input moves.
 Existing final outputs are preserved unless `--force` is supplied, and even
 then replacement occurs only after the new extraction completes.
 
-The primary output is the only data input read by Quarto:
+The two analysis outputs follow the audited Excel schema, with same-run
+INFO_SCORE, HWE, EAF, ERC, EAC, PAF and INFO_SCORE/HWE validity flags additionally
+retained in the call table:
 
 ```text
-quilt2_parameter_extract.parquet
+quilt2_locus_parameters.parquet
+quilt2_sample_calls.parquet
 ```
 
-The adjacent `.sha256`, `.common_loci.tsv.gz`, and `.summary.tsv` files are
-audit sidecars. Complete candidate headers, dynamic INFO/FORMAT definitions,
+The locus table has one row per locus × physical run (12 rows per locus).
+Its 30 base columns, in workbook order, are:
+
+```text
+source_id, chrom, pos, ref, alt, treatment, panel, truth_source,
+info_score, eaf, hwe, erc, eac, paf,
+truth_vcf_id, truth_ref, truth_alt, truth_qual, allele_alignment_status,
+info_score_valid, hwe_valid, n_correct_source, percent_correct_source,
+n_correct_panel, percent_correct_panel, n_correct_pooled, percent_correct_pooled,
+mean_info_score, truth_alt_allele_count, truth_maf
+```
+
+The call table has one row per locus × physical run × selected sample
+(150 rows per locus across all runs). Its 29 base columns are:
+
+```text
+source_id, chrom, pos, ref, alt, treatment, panel, truth_source,
+sample_id, array_group, fmt__gt, fmt__gp, fmt__ds, truth_gt_raw,
+truth_gq, truth_dp, imputed_gt_dosage, truth_dosage_aligned, gt_correct,
+gp_valid, maxGP, info_score, info_score_valid,
+hwe, eaf, erc, eac, paf, hwe_valid
+```
+
+The eight appended site fields are copied from the same locus × physical run and also
+remain in the locus table. All 18 selected Array samples share that Array run's
+annotations; all seven WGS samples share their separate WGS run's annotations. Values may
+differ by treatment, panel, or Array/WGS cohort. They are neither averaged nor
+recomputed per sample. The call file alone now supplies `gt_correct`, `maxGP`,
+`info_score`, `hwe`, `eaf`, `erc`, `eac`, `paf`, and the existing GP/INFO_SCORE/HWE
+validity flags for call-level models. Missing or invalid site annotations do not
+change GT correctness or mask membership. HWE is included once, and a zero HWE
+p-value is preserved with `hwe_valid = TRUE`; no logarithmic transform is applied.
+
+Join on `chrom`, `pos`, `ref`, `alt`, and `source_id`. Add `sample_id` to
+identify a call row. All additional emitted INFO tags are appended to the locus
+table without the `info__` prefix. Additional FORMAT tags are appended to the
+call table with `fmt__`, except `fmt__hd`, which is deliberately omitted.
+The VCF fields `vcf_id`, `qual`, `filter`, and `truth_filter` are stored once per
+source in metadata if constant within every run. If any run has varying values
+for a field, that field is retained as a locus column instead. These audit rules
+can therefore produce more than 30/29 columns without dropping source information.
+
+Payload types follow the mock: INFO_SCORE and HWE are numeric; Number=.
+EAF/ERC/EAC/PAF payloads retain their existing text representation. Convert
+scalar numeric strings explicitly before statistical modelling. Missing optional
+annotations remain null and do not change the mask. Raw record containers,
+redundant locus/run IDs, expanded GP components, per-row provenance, and constant
+completeness flags are not exported. `truth_maf` is a locus-level statistic over
+the 25 unique truth samples, not a sample-level or reference-panel frequency.
+
+Each Parquet has an adjacent `.sha256`. The shared
+`quilt2_parameter_validation.common_loci.tsv.gz` and
+`quilt2_parameter_validation.summary.tsv` are audit sidecars, not analysis inputs.
+Existing v5 Parquets and their old `quilt2_parameter_extract.*` sidecars are left
+untouched. Complete candidate headers, dynamic INFO/FORMAT definitions,
 source signatures, candidate checksums, sample mapping, thresholds, all twelve
 evaluation artifacts, and all mask-stage counts are embedded in Parquet
-metadata. Site values are compressed with ZSTD and dictionary encoding.
+metadata in both files. Each file has a `table_role`, its column list and primary
+key, and a shared `extraction_id` and mask hash. Check those shared identifiers
+before joining files from different locations. Fixed denominators are stored in
+`fixed_denominators_json`: source 18 Array or 7 WGS, panel 25, pooled 75, and
+25 unique truth samples/50 alleles. Values use ZSTD and dictionary encoding.
 Array mask-source checksums hash the input file; WGS checksums hash a sorted
 TSV of each Parquet part's SHA-256 and absolute path. The precise checksum
 definition is embedded alongside the source paths and position hashes.
 
-The extractor writes schema `quilt2-parameter-validation-v5`, which the updated
-report requires. Older v4 Parquets must be re-extracted from the existing
-outputs; QUILT2, BEAGLE, and GATK are not rerun. The v5 metadata records
+The extractor writes schema `quilt2-parameter-validation-v8`. Compared with v7,
+it adds `hwe`, `eaf`, `erc`, `eac`, `paf`, and `hwe_valid` to the call table;
+`info_score` and `info_score_valid` added in v7 remain. The mask and correctness
+calculations are unchanged. Re-extract into a new `--output-dir` to preserve older files,
+or explicitly use `--force` to replace the two-file outputs. Re-extract from the
+existing outputs; QUILT2, BEAGLE, and GATK are not rerun. The metadata records
 `mask_completeness=all_samples_all_runs` and 150 required comparisons per locus.
 Its `accuracy_target=reported_gt` and `analysis_compromise`
 metadata record the agreed simplification; the compromise is also included in
-the extraction log, summary sidecar, and report provenance. All emitted GP
-fields and their expanded components remain in the Parquet for future work.
+the extraction log and summary sidecar. The original `fmt__gp` vector remains
+in the call Parquet for future work; separate GP component columns are omitted.
 `gp_valid` now describes probability-vector validity only (three finite values
 in [0,1] with an acceptable sum; tied maxima are allowed). Missing or malformed
-GP does not invalidate an otherwise evaluable GT. GP confidence, GP-argmax
-correctness, and GT-versus-GP disagreement metrics are no longer derived.
+GP does not invalidate an otherwise evaluable GT. `maxGP` is the maximum of
+the three probabilities when `gp_valid` is TRUE, otherwise null. Ties retain
+their shared maximum. It is not an argmax genotype index, and is not used to
+filter calls or calculate correctness. GP-argmax correctness and GT-versus-GP
+disagreement metrics are not derived.
 
-Render the report locally or on Bunya with exactly one data parameter:
+Load only the table needed for an analysis, for example in R or Quarto:
 
-```bash
-quarto render \
-  analysis/quilt2_parameter_validation/quilt2_parameter_validation.qmd \
-  -P data_file:/path/to/quilt2_parameter_extract.parquet
+```r
+loci <- arrow::read_parquet("quilt2_locus_parameters.parquet")
+calls <- arrow::read_parquet("quilt2_sample_calls.parquet")
 ```
 
-Rendering requires Quarto and the R packages `arrow`, `dplyr`, `ggplot2`,
-`jsonlite`, `knitr`, `scales`, and `tibble`.
+The existing `quilt2_parameter_validation.qmd` and single-file
+`load_long_table.qmd` have not been migrated by this extractor-only change.
+They still expect the v5 single-file interface and must not be pointed at one
+of these v8 files. Existing v5 data can still be used with the old report.
+The description of the existing report below does not imply v8 compatibility.
 
 Quarto selects only columns needed for each view. It does not open VCFs, call
 `bcftools`, harmonise alleles, derive truth dosage, or recalculate correctness
@@ -526,7 +596,20 @@ the full 17-chromosome run must be completed on Bunya. For the pilot, also
 confirm all twelve evaluator position counts, their intersection count,
 the exact-allele candidate count, and the loci removed by completeness. The
 final mask must contain the same loci in every sample and condition, with
-exactly `150 × final_loci` Parquet rows and no unevaluable comparisons.
+exactly `12 × final_loci` locus rows and `150 × final_loci` call rows, with
+no unevaluable comparisons. Verify the workbook base order plus the eight appended
+call site fields, no `locus_id`, no `info__` prefixes, no `fmt__hd` or GP component
+columns, and no site correctness/MAF summaries on call rows. Check the two
+metadata `extraction_id` and `mask_sha256` values
+match, fixed denominators are present, and both `.sha256` sidecars verify.
+Confirm every call's `info_score`, `hwe`, `eaf`, `erc`, `eac`, `paf`,
+`info_score_valid`, and `hwe_valid` equal the matching locus
+row on `chrom`, `pos`, `ref`, `alt`, and `source_id`, including missing values.
+Check the Array and WGS emissions remain separate even within the same panel
+and treatment. Verify invalid INFO_SCORE leaves the call present with unchanged
+GT correctness, and is flagged by `info_score_valid = FALSE`. Likewise verify
+invalid HWE is flagged without excluding the call, zero HWE remains valid, and
+EAF/ERC/EAC/PAF text payloads are preserved without reorientation or averaging.
 For chromosome-VCF reuse, confirm that the pilot logs the existing WGS VCF
 paths, does not rebuild chunks, and records those VCFs as the checksum sources.
 Verify that a missing VCF/index or absent target sample causes preflight to
@@ -542,11 +625,19 @@ orientation excludes the locus from all six conditions. A complete but
 incorrect call must not exclude it. Verify a fully evaluable locus is retained,
 with 25/25 panel counts, 75/75 pooled counts in both treatments, and 150 total
 comparisons. Also verify an empty complete mask stops with a clear error.
-For the simplified analysis, verify the v5 mask/compromise metadata and that
+For the simplified analysis, verify the v8 mask/compromise metadata and that
 overall correct/valid counts equal the sums of the per-locus pooled counts.
 Check examples with low, missing, malformed, and tied GP: valid GT–truth
 comparisons must still contribute, with correctness determined solely by GT.
-Confirm Quarto rejects a v4 Parquet and renders the v5 file without opening VCFs.
+Check `maxGP` against the full GP vector: e.g. `0.1,0.8,0.1` gives 0.8 and
+`0.5,0.5,0` gives 0.5; missing, malformed, out-of-range, or invalid-sum vectors
+give null. All these GP cases must leave GT correctness and the mask unchanged.
+Verify constant VCF fields are recoverable from `constant_vcf_fields_json`, and
+a varying field is retained as a locus column. Confirm additional INFO/FORMAT
+tags survive at the correct resolution, except HD. For unchanged input files
+and thresholds, compare the final mask hash, aligned dosages, correctness,
+source/panel/pooled counts and percentages, and truth MAF with the v5 output.
+Quarto migration and rendering against the v8 pair remain a separate step.
 
 ## Concordance & dosage r² (imputed vs truth)
 

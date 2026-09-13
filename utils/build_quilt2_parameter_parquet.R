@@ -1,6 +1,7 @@
 #!/usr/bin/env Rscript
 # Agreed compromise: score reported GT against truth regardless of GP confidence.
-# GP is retained as emitted data; no GP-argmax correctness or calibration is derived.
+# Write the audited locus/call schemas. GP and maxGP are retained for auditing;
+# no GP-argmax correctness or calibration is derived. FORMAT/HD is omitted.
 # Final loci require evaluable GT-truth comparisons for all 25 targets in all six conditions.
 
 suppressPackageStartupMessages({
@@ -17,11 +18,34 @@ analysis_compromise <- paste(
   "The final mask requires valid aligned truth and reported GT for every target in every run."
 )
 
+# Base order follows Locus_mock and Calls_mock in quilt2_parquet_schema_mock.xlsx.
+# Calls additionally retain same-run INFO_SCORE, HWE, EAF, ERC, EAC, PAF and
+# INFO_SCORE/HWE validity flags for call-level analysis without a locus join.
+# Additional emitted INFO/FORMAT fields are retained at their own resolution,
+# except FORMAT/HD. Internal validity checks and provenance are not row columns.
+locus_columns <- c(
+  "source_id", "chrom", "pos", "ref", "alt", "treatment", "panel", "truth_source",
+  "info_score", "eaf", "hwe", "erc", "eac", "paf",
+  "truth_vcf_id", "truth_ref", "truth_alt", "truth_qual", "allele_alignment_status",
+  "info_score_valid", "hwe_valid", "n_correct_source", "percent_correct_source",
+  "n_correct_panel", "percent_correct_panel", "n_correct_pooled", "percent_correct_pooled",
+  "mean_info_score", "truth_alt_allele_count", "truth_maf"
+)
+call_columns <- c(
+  "source_id", "chrom", "pos", "ref", "alt", "treatment", "panel", "truth_source",
+  "sample_id", "array_group", "fmt__gt", "fmt__gp", "fmt__ds", "truth_gt_raw",
+  "truth_gq", "truth_dp", "imputed_gt_dosage", "truth_dosage_aligned", "gt_correct",
+  "gp_valid", "maxGP", "info_score", "info_score_valid",
+  "hwe", "eaf", "erc", "eac", "paf", "hwe_valid"
+)
+join_columns <- c("chrom", "pos", "ref", "alt", "source_id")
+schema_version <- "quilt2-parameter-validation-v8"
+
 parse_args <- function(args) {
   value_options <- c(
     "--staged-manifest", "--truth-manifest", "--eval-mask-manifest", "--eval-mask",
     "--sample-map", "--array-truth", "--wgs-truth",
-    "--output", "--mask-out", "--summary-out", "--min-gq", "--min-dp",
+    "--locus-output", "--calls-output", "--mask-out", "--summary-out", "--min-gq", "--min-dp",
     "--gp-sum-tolerance"
   )
   opts <- list(
@@ -32,7 +56,8 @@ parse_args <- function(args) {
     sample_map = NULL,
     array_truth = NULL,
     wgs_truth = NULL,
-    output = NULL,
+    locus_output = NULL,
+    calls_output = NULL,
     mask_out = NULL,
     summary_out = NULL,
     min_gq = 60,
@@ -47,7 +72,8 @@ parse_args <- function(args) {
     "--sample-map" = "sample_map",
     "--array-truth" = "array_truth",
     "--wgs-truth" = "wgs_truth",
-    "--output" = "output",
+    "--locus-output" = "locus_output",
+    "--calls-output" = "calls_output",
     "--mask-out" = "mask_out",
     "--summary-out" = "summary_out",
     "--min-gq" = "min_gq",
@@ -63,7 +89,7 @@ parse_args <- function(args) {
         "Usage: build_quilt2_parameter_parquet.R",
         "--staged-manifest FILE --truth-manifest FILE",
         "--eval-mask-manifest FILE --eval-mask FILE --sample-map FILE",
-        "--array-truth VCF --wgs-truth VCF --output FILE",
+        "--array-truth VCF --wgs-truth VCF --locus-output FILE --calls-output FILE",
         "--mask-out FILE --summary-out FILE",
         "[--min-gq 60] [--min-dp 10] [--gp-sum-tolerance 0.001]\n"
       ))
@@ -79,7 +105,7 @@ parse_args <- function(args) {
   required <- c(
     "staged_manifest", "truth_manifest", "eval_mask_manifest", "eval_mask",
     "sample_map", "array_truth", "wgs_truth",
-    "output", "mask_out", "summary_out"
+    "locus_output", "calls_output", "mask_out", "summary_out"
   )
   missing <- required[vapply(required, function(x) is.null(opts[[x]]), logical(1))]
   if (length(missing)) fail("Missing required option(s): ", paste(missing, collapse = ", "))
@@ -103,7 +129,10 @@ for (path in c(
 )) {
   if (!file.exists(path)) fail("Input not found: ", path)
 }
-if (file.exists(opts$output)) fail("Refusing to overwrite existing output: ", opts$output)
+if (opts$locus_output == opts$calls_output) fail("Locus and call outputs must be different files")
+for (path in c(opts$locus_output, opts$calls_output)) {
+  if (file.exists(path)) fail("Refusing to overwrite existing output: ", path)
+}
 
 read_tabular <- function(path, label) {
   result <- fread(
@@ -592,6 +621,7 @@ add_format_columns <- function(calls, definitions) {
     )
   }
   validate_field_ids(data.table(kind = "FORMAT", id = declared$id), "FORMAT")
+  declared <- declared[toupper(id) != "HD"]
   for (i in seq_len(nrow(declared))) {
     definition <- declared[i]
     column <- paste0("fmt__", sanitize_field_id(definition$id))
@@ -702,7 +732,7 @@ make_truth_long <- function(vcf, truth_source, expected_samples) {
 array_truth_long <- make_truth_long(array_truth, "array", array_samples)
 wgs_truth_long <- make_truth_long(wgs_truth, "wgs", wgs_samples)
 
-cat("Expanding all emitted INFO and FORMAT fields\n")
+cat("Extracting locus INFO and sample FORMAT fields (excluding FORMAT/HD)\n")
 call_tables <- vector("list", nrow(manifest))
 all_headers <- list()
 all_definitions <- list()
@@ -723,18 +753,9 @@ for (i in seq_len(nrow(manifest))) {
   calls <- add_format_columns(calls, object$definitions)
   calls[, `:=`(
     source_id = config$source_id,
-    run_id = config$logical_run_id,
     treatment = config$treatment,
     panel = config$panel,
-    truth_source = config$truth_source,
-    source_input_type = config$input_type,
-    source_path = config$source_path,
-    source_sample_count = config$source_sample_count,
-    selected_sample_count = config$selected_sample_count,
-    source_samples_sha256 = config$source_samples_sha256,
-    source_signature_sha256 = config$source_signature_sha256,
-    candidate_vcf_sha256 = config$candidate_vcf_sha256,
-    candidate_header_sha256 = config$candidate_header_sha256
+    truth_source = config$truth_source
   )]
   calls <- merge(
     calls,
@@ -854,8 +875,9 @@ if (anyNA(complete_call_counts) ||
   fail("Final mask must contain exactly 150 distinct valid GT-truth comparisons per locus")
 }
 
-# Preserve GP components and vector validity for future audits. These fields never
-# select calls, replace GT, or weight correctness. Tied probabilities are permitted.
+# Parse GP temporarily to calculate gp_valid and maxGP. Only the original vector,
+# validity flag and maximum are exported; these never select or score GT calls.
+# Tied probabilities retain their shared maximum.
 gp_pieces <- tstrsplit(calls$fmt__gp, ",", fixed = TRUE, fill = NA_character_)
 gp_component_count <- fifelse(
   is.na(calls$fmt__gp) | calls$fmt__gp == "",
@@ -872,9 +894,8 @@ gp_in_range <- gp_finite & rowSums(gp_matrix >= 0 & gp_matrix <= 1) == 3L
 gp_sum <- rowSums(gp_matrix, na.rm = FALSE)
 gp_valid <- gp_in_range & abs(gp_sum - 1) <= opts$gp_sum_tolerance
 calls[, `:=`(
-  gp_component_count = gp_component_count,
-  gp_probability_sum = gp_sum,
-  gp_valid = gp_valid
+  gp_valid = gp_valid,
+  maxGP = fifelse(gp_valid, pmax(fmt__gp_0, fmt__gp_1, fmt__gp_2), NA_real_)
 )]
 
 cat("Calculating fixed-denominator site metrics\n")
@@ -972,15 +993,45 @@ truth_frequency[, truth_maf := fifelse(
 )]
 calls <- merge(calls, truth_frequency, by = "locus_id", all.x = TRUE, sort = FALSE)
 
-calls[, `:=`(
-  eval_mask_position_count = nrow(eval_mask),
-  eval_mask_sha256 = eval_mask_sha256,
-  mask_sha256 = mask_sha256,
-  extraction_schema_version = "quilt2-parameter-validation-v5"
-)]
 calls[, chromosome_number := suppressWarnings(as.integer(sub("^Chr", "", chrom)))]
 setorder(calls, chromosome_number, pos, treatment, panel, truth_source, sample_id)
 calls[, c("chromosome_number", "ref_group", "alt_group") := NULL]
+
+# Keep fixed VCF fields in metadata when constant within every physical run.
+# A field that varies within any run remains a locus column, as agreed in the audit.
+constant_vcf_fields <- list()
+for (column in c("vcf_id", "qual", "filter", "truth_filter")) {
+  values <- unique(calls[, c("source_id", column), with = FALSE])
+  if (all(values[, .N, by = source_id]$N == 1L)) {
+    constant_vcf_fields[[column]] <- values
+  } else {
+    locus_columns <- c(locus_columns, column)
+  }
+}
+
+# INFO columns lose only the info__ prefix; preserve their existing payload types.
+exported_info_columns <- sub("^info__", "", emitted_info_columns)
+if (length(intersect(exported_info_columns, setdiff(names(calls), emitted_info_columns)))) {
+  fail("An INFO tag conflicts with an existing column after removing the info__ prefix")
+}
+setnames(calls, emitted_info_columns, exported_info_columns)
+# Missing optional fields keep a stable base schema and never change the mask.
+for (column in setdiff(c("eaf", "erc", "eac", "paf", "fmt__gp"), names(calls))) {
+  set(calls, j = column, value = NA_character_)
+}
+for (column in setdiff(c("info_score", "hwe", "fmt__ds"), names(calls))) {
+  set(calls, j = column, value = NA_real_)
+}
+locus_columns <- c(locus_columns, setdiff(exported_info_columns, locus_columns))
+call_columns <- c(call_columns, setdiff(emitted_format_columns, call_columns))
+loci <- unique(calls[, ..locus_columns])
+sample_calls <- calls[, ..call_columns]
+if (nrow(loci) != nrow(common_mask) * 12L || anyDuplicated(loci, by = join_columns)) {
+  fail("Locus table must contain one row per locus x physical source (12 rows per locus)")
+}
+if (anyDuplicated(sample_calls, by = c(join_columns, "sample_id"))) {
+  fail("Call table contains duplicate locus x source x sample rows")
+}
 
 field_dictionary <- rbindlist(c(
   lapply(seq_len(nrow(manifest)), function(i) {
@@ -996,7 +1047,7 @@ field_dictionary <- rbindlist(c(
 ), fill = TRUE)
 
 metadata <- list(
-  extraction_schema_version = "quilt2-parameter-validation-v5",
+  extraction_schema_version = schema_version,
   created_utc = format(Sys.time(), tz = "UTC", usetz = TRUE),
   accuracy_target = "reported_gt",
   analysis_compromise = analysis_compromise,
@@ -1028,6 +1079,31 @@ metadata <- list(
   ),
   final_mask_attrition_from_eval = as.character(nrow(eval_mask) - nrow(common_mask)),
   expected_call_rows = as.character(nrow(common_mask) * 6L * 25L),
+  expected_locus_rows = as.character(nrow(common_mask) * 12L),
+  join_columns_json = jsonlite::toJSON(join_columns),
+  fixed_denominators_json = jsonlite::toJSON(list(
+    source = list(array = 18L, wgs = 7L), panel = 25L, pooled = 75L,
+    truth_samples = 25L, truth_alleles = 50L
+  ), auto_unbox = TRUE),
+  constant_vcf_fields_json = jsonlite::toJSON(constant_vcf_fields, dataframe = "rows", auto_unbox = TRUE, na = "null"),
+  output_schema_definition = paste(
+    "Locus_mock and Calls_mock base order, with info_score, info_score_valid, hwe, eaf,",
+    "erc, eac, paf and hwe_valid appended to calls;",
+    "additional emitted INFO/FORMAT tags retained",
+    "at their own resolution except FORMAT/HD. INFO prefix removed, FORMAT prefix retained.",
+    "vcf_id, qual, filter and truth_filter are metadata if constant within every source,",
+    "otherwise locus columns. Raw containers, GP components, duplicate IDs and constant",
+    "completeness flags are not exported as columns. Source VCFs remain unchanged."
+  ),
+  call_site_annotations_definition = paste(
+    "Original INFO_SCORE, HWE, EAF, ERC, EAC, PAF and INFO_SCORE/HWE validity flags",
+    "copied from the same locus x physical source",
+    "to every selected sample row, and also retained in the locus table. Shared within",
+    "locus x treatment x panel x truth_source, not necessarily across Array and WGS.",
+    "No averaging, allele reorientation, or sample-specific recalculation is applied;",
+    "payload types and missing values match the locus table. Missing/invalid annotations",
+    "do not exclude otherwise evaluable GT calls. HWE zero is retained as a valid p-value."
+  ),
   mask_sha256 = mask_sha256,
   wgs_truth_min_gq = as.character(opts$min_gq),
   wgs_truth_min_dp = as.character(opts$min_dp),
@@ -1035,6 +1111,10 @@ metadata <- list(
   gp_valid_definition = paste(
     "Three finite probabilities in [0,1] with sum within gp_sum_tolerance of one;",
     "ties permitted. Audit flag only, never used to filter GT accuracy."
+  ),
+  maxGP_definition = paste(
+    "Maximum of the three original GP probabilities when gp_valid is TRUE; otherwise null.",
+    "Ties retain their shared maximum. Not an argmax genotype index or a GT accuracy filter."
   ),
   info_score_aggregation = paste(
     "Target-count-weighted mean of the Array-run and WGS-run INFO_SCORE values",
@@ -1049,8 +1129,9 @@ metadata <- list(
   truth_manifest_json = jsonlite::toJSON(truth_manifest, dataframe = "rows", auto_unbox = TRUE),
   sample_map_json = jsonlite::toJSON(sample_map, dataframe = "rows", auto_unbox = TRUE),
   field_dictionary_json = jsonlite::toJSON(field_dictionary, dataframe = "rows", auto_unbox = TRUE),
-  emitted_info_columns_json = jsonlite::toJSON(emitted_info_columns, auto_unbox = TRUE),
-  emitted_format_columns_json = jsonlite::toJSON(emitted_format_columns, auto_unbox = TRUE),
+  exported_info_columns_json = jsonlite::toJSON(exported_info_columns),
+  exported_format_columns_json = jsonlite::toJSON(emitted_format_columns),
+  omitted_format_tags_json = jsonlite::toJSON("HD"),
   source_headers_json = jsonlite::toJSON(c(
     all_headers,
     list(array_truth = array_truth$header, wgs_truth = wgs_truth$header)
@@ -1067,21 +1148,27 @@ metadata <- list(
   ), dataframe = "rows", auto_unbox = TRUE)
 )
 
-cat("Writing single enriched Parquet\n")
-output_table <- Table$create(as.data.frame(calls))
-output_table <- output_table$ReplaceSchemaMetadata(metadata)
-write_parquet(
-  output_table,
-  opts$output,
-  compression = "zstd",
-  use_dictionary = TRUE,
-  write_statistics = TRUE
-)
-
-written_reader <- ParquetFileReader$create(opts$output)
-if (written_reader$num_rows != nrow(calls)) {
-  fail("Written Parquet row count does not match in-memory call table")
+metadata$extraction_id <- digest::digest(metadata, algo = "sha256")
+write_output <- function(data, path, role, keys) {
+  table_metadata <- c(metadata, list(
+    table_role = role,
+    primary_key_json = jsonlite::toJSON(keys),
+    output_columns_json = jsonlite::toJSON(names(data))
+  ))
+  output_table <- Table$create(as.data.frame(data))$ReplaceSchemaMetadata(table_metadata)
+  write_parquet(output_table, path, compression = "zstd", use_dictionary = TRUE, write_statistics = TRUE)
+  reader <- ParquetFileReader$create(path)
+  schema <- reader$GetSchema()
+  if (reader$num_rows != nrow(data) || !identical(names(schema), names(data)) ||
+      !identical(schema$metadata$extraction_id, metadata$extraction_id) ||
+      !identical(schema$metadata$table_role, role)) {
+    fail("Written ", role, " Parquet failed row-count/schema/metadata verification")
+  }
+  cat("Created ", role, " Parquet: ", nrow(data), " rows x ", ncol(data), " columns\n", sep = "")
 }
+cat("Writing separate locus and sample-call Parquets\n")
+write_output(loci, opts$locus_output, "loci", join_columns)
+write_output(sample_calls, opts$calls_output, "calls", c(join_columns, "sample_id"))
 
 summary <- data.table(
   metric = c(
@@ -1089,12 +1176,13 @@ summary <- data.table(
     "exact_allele_loci", "completeness_excluded_loci", "common_loci",
     "mask_completeness", "mask_expected_comparisons_per_locus",
     "final_mask_attrition_from_eval", "logical_conditions",
-    "physical_sources", "samples", "array_samples", "wgs_samples", "rows", "mask_sha256",
+    "physical_sources", "samples", "array_samples", "wgs_samples", "call_rows", "mask_sha256",
+    "locus_rows", "locus_columns", "call_columns", "extraction_id",
     "emitted_info_columns", "emitted_format_columns", "site_cc_eligible_rows",
     "pooled_site_eligible_rows", "gt_comparable_calls", "accuracy_target", "analysis_compromise"
   ),
   value = c(
-    "quilt2-parameter-validation-v5",
+    schema_version,
     nrow(eval_mask),
     eval_mask_sha256,
     exact_allele_locus_count,
@@ -1110,6 +1198,10 @@ summary <- data.table(
     nrow(sample_map[truth_source == "wgs"]),
     nrow(calls),
     mask_sha256,
+    nrow(loci),
+    ncol(loci),
+    ncol(sample_calls),
+    metadata$extraction_id,
     length(emitted_info_columns),
     length(emitted_format_columns),
     unique(calls[, .(locus_id, treatment, panel, site_cc_eligible)])[site_cc_eligible == TRUE, .N],
@@ -1121,7 +1213,8 @@ summary <- data.table(
 )
 fwrite(summary, opts$summary_out, sep = "\t", quote = FALSE)
 
-cat("Created: ", opts$output, "\n", sep = "")
+cat("Created: ", opts$locus_output, "\n", sep = "")
+cat("Created: ", opts$calls_output, "\n", sep = "")
 cat("Twelve-run Array/WGS evaluator mask positions: ", nrow(eval_mask), "\n", sep = "")
 cat("Final all-samples/all-runs mask loci (150/150 valid comparisons): ", nrow(common_mask), "\n", sep = "")
 cat("Call rows: ", nrow(calls), "\n", sep = "")

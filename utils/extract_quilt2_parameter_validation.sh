@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Build the single enriched Parquet used by the QUILT2 parameter-validation report.
+# Build the audited locus-level and sample-call Parquets for parameter validation.
 # Real extraction is intentionally restricted to a Bunya SLURM allocation.
 # Agreed compromise: evaluate reported GT correctness regardless of GP confidence.
-# Retain emitted GP for auditing; do not assess GP-argmax correctness or calibration.
+# Retain GP and maxGP for auditing, omit HD; no GP-argmax correctness or calibration.
 # Final mask: all 25 targets must have evaluable GT and truth in all six conditions.
 
 #SBATCH --job-name=quilt2_parameter_extract
@@ -25,14 +25,14 @@ MASK_POSITION_HELPER="${SCRIPT_DIR}/extract_array_evaluation_positions.R"
 # Hard-coded Bunya configuration: no command-line arguments are required.
 # The bundled manifest and sample map are resolved relative to this script.
 # ARRAY_TRUTH and its index are listed in scratch_structure.txt; verify on Bunya.
-# OUTPUT is relative to the directory from which bash is launched, not SCRIPT_DIR.
+# OUTPUT_DIR is relative to where bash is launched, not SCRIPT_DIR.
 # Existing command-line options can override these declarations for a pilot run.
 declare RUN_MANIFEST="${ROOT_DIR}/analysis/quilt2_parameter_validation/run_manifest.example.tsv"
 declare ARRAY_TRUTH="/scratch/project_mnt/S0218/downsampling/truth_array.vcf.gz"
 declare WGS_TRUTH_DIR="/QRISdata/Q8367/WGS_Reference_Panel/NCBI_truth_set/7.Consolidated_VCF"
 declare REFERENCE_FASTA="/QRISdata/Q8367/Reference_Genome/GDDH13_1-1_formatted.fasta"
 declare SAMPLE_MAP="${ROOT_DIR}/analysis/quilt2_parameter_validation/sample_map.tsv"
-declare OUTPUT="./quilt2_parameter_validation/quilt2_parameter_extract.parquet"
+declare OUTPUT_DIR="./quilt2_parameter_validation"
 declare CHR_ARG=""  # Empty means all chromosomes, Chr01-Chr17.
 declare MIN_GQ="60"
 declare MIN_DP="10"
@@ -85,10 +85,9 @@ Options:
   --array-truth FILE     Array truth VCF/BCF containing Group I/II samples.
                          Default: /scratch/project_mnt/S0218/downsampling/
                                   truth_array.vcf.gz
-  --output FILE          Final .parquet path.
-                         Default: ./quilt2_parameter_validation/
-                                  quilt2_parameter_extract.parquet
-                         Its directory is created after preflight passes.
+  --output-dir DIR       Directory for both Parquets and audit sidecars.
+                         Default: ./quilt2_parameter_validation
+                         Created after preflight passes.
   --wgs-truth-dir DIR    Directory of Chr*_consolidated.vcf.gz truth files.
                          Default: /QRISdata/Q8367/WGS_Reference_Panel/
                                   NCBI_truth_set/7.Consolidated_VCF
@@ -140,17 +139,26 @@ There are no GP bins, GP-argmax comparisons, or probability-calibration plots.
 Missing or malformed GP does not exclude an otherwise evaluable GT call.
 Truth validity requirements still apply to GT comparisons.
 
-The command writes one Quarto input plus audit-only sidecars:
-  OUTPUT
-  OUTPUT.sha256
-  <output stem>.common_loci.tsv.gz
-  <output stem>.summary.tsv
+The command writes the audited two-file schema in OUTPUT_DIR:
+  quilt2_locus_parameters.parquet   One row per locus x physical run.
+  quilt2_sample_calls.parquet       One row per locus x run x sample.
+  Each Parquet has an adjacent .sha256 audit sidecar.
+  quilt2_parameter_validation.common_loci.tsv.gz
+  quilt2_parameter_validation.summary.tsv
+
+INFO fields have no info__ prefix. FORMAT fields keep fmt__, except HD is
+omitted. Calls retain the original GP vector, gp_valid, maxGP, and the same-run
+info_score, hwe, eaf, erc, eac, paf, info_score_valid and hwe_valid. These site
+annotations keep their original payload types and are shared within each locus x
+treatment x panel x Array/WGS cohort, not necessarily between the two cohorts.
+Provenance, fixed denominators, and constant VCF fields are metadata, not repeated
+columns. Existing single-file v5 outputs are not modified or deleted.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --run-manifest|--array-truth|--wgs-truth-dir|--reference-fasta|--sample-map|--output|--chr|--min-gq|--min-dp|--gp-sum-tolerance)
+        --run-manifest|--array-truth|--wgs-truth-dir|--reference-fasta|--sample-map|--output-dir|--chr|--min-gq|--min-dp|--gp-sum-tolerance)
             [[ $# -ge 2 ]] || die "Missing value for $1"
             case "$1" in
                 --run-manifest) RUN_MANIFEST="$2" ;;
@@ -158,7 +166,7 @@ while [[ $# -gt 0 ]]; do
                 --wgs-truth-dir) WGS_TRUTH_DIR="$2" ;;
                 --reference-fasta) REFERENCE_FASTA="$2" ;;
                 --sample-map) SAMPLE_MAP="$2" ;;
-                --output) OUTPUT="$2" ;;
+                --output-dir) OUTPUT_DIR="$2" ;;
                 --chr) CHR_ARG="$2" ;;
                 --min-gq) MIN_GQ="$2" ;;
                 --min-dp) MIN_DP="$2" ;;
@@ -168,12 +176,13 @@ while [[ $# -gt 0 ]]; do
             ;;
         --dry-run) DRY_RUN=true; shift ;;
         --force) FORCE=true; shift ;;
+        --output) die "The two-file schema uses --output-dir DIR instead of --output FILE" ;;
         --help|-h) usage; exit 0 ;;
         *) die "Unknown option: $1" ;;
     esac
 done
 
-[[ "${OUTPUT}" == *.parquet ]] || die "--output must end in .parquet"
+[[ -n "${OUTPUT_DIR}" ]] || die "--output-dir must not be empty"
 [[ -f "${RUN_MANIFEST}" ]] || die "Run manifest not found: ${RUN_MANIFEST}"
 [[ -f "${SAMPLE_MAP}" ]] || die "Sample map not found: ${SAMPLE_MAP}"
 [[ -f "${ARRAY_TRUTH}" ]] || die "Array truth not found: ${ARRAY_TRUTH}"
@@ -393,28 +402,29 @@ if [[ "${DRY_RUN}" == "true" ]]; then
     exit 0
 fi
 
-OUTPUT_DIR="$(dirname "${OUTPUT}")"
 mkdir -p "${OUTPUT_DIR}"
 OUTPUT_DIR="$(cd "${OUTPUT_DIR}" && pwd)"
-OUTPUT="${OUTPUT_DIR}/$(basename "${OUTPUT}")"
-OUTPUT_STEM="${OUTPUT%.parquet}"
-MASK_OUTPUT="${OUTPUT_STEM}.common_loci.tsv.gz"
-SUMMARY_OUTPUT="${OUTPUT_STEM}.summary.tsv"
-CHECKSUM_OUTPUT="${OUTPUT}.sha256"
+LOCUS_OUTPUT="${OUTPUT_DIR}/quilt2_locus_parameters.parquet"
+CALLS_OUTPUT="${OUTPUT_DIR}/quilt2_sample_calls.parquet"
+MASK_OUTPUT="${OUTPUT_DIR}/quilt2_parameter_validation.common_loci.tsv.gz"
+SUMMARY_OUTPUT="${OUTPUT_DIR}/quilt2_parameter_validation.summary.tsv"
+LOCUS_CHECKSUM="${LOCUS_OUTPUT}.sha256"
+CALLS_CHECKSUM="${CALLS_OUTPUT}.sha256"
 if [[ "${FORCE}" != "true" ]]; then
-    for existing in "${OUTPUT}" "${MASK_OUTPUT}" "${SUMMARY_OUTPUT}" "${CHECKSUM_OUTPUT}"; do
+    for existing in "${LOCUS_OUTPUT}" "${CALLS_OUTPUT}" "${MASK_OUTPUT}" "${SUMMARY_OUTPUT}" "${LOCUS_CHECKSUM}" "${CALLS_CHECKSUM}"; do
         [[ ! -e "${existing}" ]] || die "Output exists (use --force): ${existing}"
     done
 fi
 
 STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/quilt2_parameter_extract.XXXXXX")"
-PARTIAL_PARQUET="${OUTPUT}.partial.${SLURM_JOB_ID}"
+PARTIAL_LOCUS="${LOCUS_OUTPUT}.partial.${SLURM_JOB_ID}"
+PARTIAL_CALLS="${CALLS_OUTPUT}.partial.${SLURM_JOB_ID}"
 PARTIAL_MASK="${MASK_OUTPUT}.partial.${SLURM_JOB_ID}"
 PARTIAL_SUMMARY="${SUMMARY_OUTPUT}.partial.${SLURM_JOB_ID}"
 cleanup() {
     status=$?
     [[ -z "${STAGE_DIR}" || ! -d "${STAGE_DIR}" ]] || rm -rf "${STAGE_DIR}"
-    rm -f "${PARTIAL_PARQUET}" "${PARTIAL_MASK}" "${PARTIAL_SUMMARY}" "${ARRAY_SAMPLES}" "${WGS_SAMPLES}"
+    rm -f "${PARTIAL_LOCUS}" "${PARTIAL_CALLS}" "${PARTIAL_MASK}" "${PARTIAL_SUMMARY}" "${ARRAY_SAMPLES}" "${WGS_SAMPLES}"
     exit "${status}"
 }
 trap cleanup EXIT
@@ -644,7 +654,7 @@ for row in "${RUN_ROWS[@]}"; do
         "${source_samples_sha256}" "${source_signature}" "${CANDIDATE_SHA256}" "${HEADER_SHA256}" >> "${STAGED_MANIFEST}"
 done
 
-log_info "Building the final all-samples/all-runs mask, aligned call table, and correctness metrics"
+log_info "Building the final all-samples/all-runs mask, locus/call tables, and correctness metrics"
 log_info "Analysis compromise: reported GT correctness only, regardless of GP; probability calibration is not assessed"
 Rscript "${R_HELPER}" \
     --staged-manifest "${STAGED_MANIFEST}" \
@@ -654,25 +664,30 @@ Rscript "${R_HELPER}" \
     --sample-map "${SAMPLE_MAP}" \
     --array-truth "${ARRAY_TRUTH_CANDIDATE}" \
     --wgs-truth "${WGS_TRUTH_CANDIDATE}" \
-    --output "${PARTIAL_PARQUET}" \
+    --locus-output "${PARTIAL_LOCUS}" \
+    --calls-output "${PARTIAL_CALLS}" \
     --mask-out "${PARTIAL_MASK}" \
     --summary-out "${PARTIAL_SUMMARY}" \
     --min-gq "${MIN_GQ}" \
     --min-dp "${MIN_DP}" \
     --gp-sum-tolerance "${GP_SUM_TOLERANCE}"
 
-[[ -s "${PARTIAL_PARQUET}" ]] || die "R helper did not create a Parquet file"
+[[ -s "${PARTIAL_LOCUS}" ]] || die "R helper did not create the locus Parquet"
+[[ -s "${PARTIAL_CALLS}" ]] || die "R helper did not create the calls Parquet"
 [[ -s "${PARTIAL_MASK}" ]] || die "R helper did not create the mask audit table"
 [[ -s "${PARTIAL_SUMMARY}" ]] || die "R helper did not create the summary audit table"
 FINAL_MASK_LOCUS_COUNT="$(awk -F'\t' '$1 == "common_loci" {print $2}' "${PARTIAL_SUMMARY}")"
 [[ "${FINAL_MASK_LOCUS_COUNT}" =~ ^[1-9][0-9]*$ ]] || die "R helper did not report a positive final-mask locus count"
 log_info "FINAL MASK: ${FINAL_MASK_LOCUS_COUNT} loci evaluable in all 25 samples across all six conditions (150/150 comparisons per locus)"
-mv -f "${PARTIAL_PARQUET}" "${OUTPUT}"
+mv -f "${PARTIAL_LOCUS}" "${LOCUS_OUTPUT}"
+mv -f "${PARTIAL_CALLS}" "${CALLS_OUTPUT}"
 mv -f "${PARTIAL_MASK}" "${MASK_OUTPUT}"
 mv -f "${PARTIAL_SUMMARY}" "${SUMMARY_OUTPUT}"
-sha256sum "${OUTPUT}" > "${CHECKSUM_OUTPUT}"
+sha256sum "${LOCUS_OUTPUT}" > "${LOCUS_CHECKSUM}"
+sha256sum "${CALLS_OUTPUT}" > "${CALLS_CHECKSUM}"
 
-log_info "Created Quarto input: ${OUTPUT}"
+log_info "Created locus table: ${LOCUS_OUTPUT}"
+log_info "Created sample-call table: ${CALLS_OUTPUT}"
 log_info "Audit mask: ${MASK_OUTPUT}"
 log_info "Audit summary: ${SUMMARY_OUTPUT}"
-log_info "Parquet checksum: ${CHECKSUM_OUTPUT}"
+log_info "Parquet checksums: ${LOCUS_CHECKSUM}, ${CALLS_CHECKSUM}"
